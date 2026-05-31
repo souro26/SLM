@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SLM specific
+data/raw/
+data/processed/
+data/filtered/
+checkpoints/
+*.pt
+*.pth
+tokenizer/artifacts/
+wandb/
+logs/
