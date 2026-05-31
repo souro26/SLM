@@ -1,0 +1,63 @@
+# Full training run — 10B tokens
+# Only run after pilot looks healthy.
+
+run_name: "slm-full-001"
+seed: 42
+
+# Data
+train_data: data/processed/train.bin
+val_data: data/processed/val.bin
+tokenizer_path: tokenizer/artifacts/tokenizer.json
+
+# Token budget
+max_tokens: 10_000_000_000
+
+# Batch
+micro_batch_size: 4
+grad_accum_steps: 16
+
+# Optimizer
+optimizer:
+  muon:
+    lr: 3.0e-4
+    weight_decay: 0.05
+    momentum: 0.95
+    nesterov: true
+    ns_steps: 5
+
+  adamw:
+    lr: 3.0e-4
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 0.1
+
+# LR Schedule
+lr_schedule:
+  warmup_steps: 2000
+  decay: cosine
+  min_lr_ratio: 0.1
+
+# Gradient
+grad_clip: 1.0
+
+# Memory
+gradient_checkpointing: true
+compile: false
+
+# Checkpointing
+checkpoint_dir: checkpoints/full-001
+save_every_steps: 1000
+keep_last_n: 5
+resume_from: null
+
+# Logging
+log_every_steps: 10
+eval_every_steps: 1000
+logging:
+  wandb:
+    enabled: true
+    project: "slm"
+    entity: null
+  csv:
+    enabled: true
+    path: logs/full-001.csv
