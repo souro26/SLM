@@ -1,0 +1,17 @@
+# Architecture — single source of truth
+# Referenced by model, train, eval, and inference code
+
+n_layers: 24
+d_model: 512
+n_heads_q: 8
+n_heads_kv: 4
+head_dim: 64
+d_ffn: 1365
+vocab_size: 32000
+context_length: 2048
+dropout: 0.0
+dtype: bfloat16
+
+tokenizer_path: tokenizer/artifacts/tokenizer.json
+pad_token: "<|pad|>"
+eof_token: "<|endoffile|>"
