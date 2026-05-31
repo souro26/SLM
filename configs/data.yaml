@@ -1,0 +1,78 @@
+# Data pipeline config
+# Download, filter, deduplicate, tokenize, curriculum sort, pack into flat token array
+
+seed: 42
+tokenizer_path: tokenizer/artifacts/tokenizer.json
+output_dir: data/processed
+raw_dir: data/raw
+filtered_dir: data/filtered
+
+# Sources and mixture weights
+sources:
+  the_stack:
+    weight: 0.70
+    raw_path: data/raw/the_stack
+    min_stars: 5
+
+  stack_overflow:
+    weight: 0.15
+    raw_path: data/raw/stack_overflow
+    min_question_score: 5
+    accepted_answers_only: true
+
+  python_docs:
+    weight: 0.10
+    raw_path: data/raw/python_docs
+
+  curated_oss:
+    weight: 0.05
+    raw_path: data/raw/curated_oss
+    repos:
+      - numpy/numpy
+      - pytorch/pytorch
+      - pandas-dev/pandas
+      - tiangolo/fastapi
+      - psf/requests
+
+# Filtering
+filtering:
+  require_ast_valid: true
+  min_line_count: 10
+  max_line_length: 500
+  min_comment_ratio: 0.01
+  max_comment_ratio: 0.80
+
+# Deduplication
+deduplication:
+  enabled: true
+  method: minhash
+  num_perm: 128
+  threshold: 0.85
+  ngram_size: 5
+
+# Sequence packing
+packing:
+  context_length: 2048
+  eof_token: "<|endoffile|>"
+
+# Curriculum
+curriculum:
+  enabled: true
+  stages:
+    - name: simple
+      fraction: 0.40
+      max_cyclomatic_complexity: 5
+      max_nesting_depth: 3
+    - name: complex
+      fraction: 0.45
+    - name: cooldown
+      fraction: 0.15
+      sources: [python_docs, curated_oss]
+      upsample_factor: 3.0
+
+# Validation split
+validation:
+  fraction: 0.001
+  output_path: data/processed/val.bin
+
+train_output_path: data/processed/train.bin
