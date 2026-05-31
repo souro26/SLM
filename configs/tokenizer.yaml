@@ -1,0 +1,15 @@
+# Tokenizer training config
+# Run before data pipeline — everything downstream depends on this
+
+vocab_size: 32000
+corpus_dir: data/raw/tokenizer_corpus
+output_dir: tokenizer/artifacts
+
+special_tokens:
+  - "<|endoffile|>"
+  - "<|pad|>"
+  - "<|unk|>"
+
+min_frequency: 2
+byte_level: true
+show_progress: true
