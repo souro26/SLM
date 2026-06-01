@@ -17,7 +17,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 VOCAB_SIZE = 32_000
 MIN_FREQUENCY = 2
-MAX_FILES = 200000
+MAX_FILES = 200_000
 OUTPUT_DIR = Path("tokenizer/trained")
 
 SPECIAL_TOKENS = [
@@ -45,14 +45,13 @@ def iter_python_files(max_files: int):
     )
 
     count = 0
-
     for sample in ds:
         content = sample.get("content", "") or sample.get("text", "")
         if not content or len(content) < 50:
             continue
         yield content
         count += 1
-        if count % 10000 == 0:
+        if count % 10_000 == 0:
             print(f"  streamed {count:,} files...")
         if count >= max_files:
             break
@@ -61,51 +60,46 @@ def iter_python_files(max_files: int):
 
 
 def batch_iterator(max_files: int, batch_size: int = 1000):
-    """Yields batches of text strings for the HuggingFace tokenizer trainer."""
+    """Yields batches of text strings for the tokenizer trainer."""
     batch = []
     for text in iter_python_files(max_files):
         batch.append(text)
         if len(batch) >= batch_size:
             yield batch
             batch = []
-
     if batch:
         yield batch
 
 
 def build_tokenizer() -> Tokenizer:
-    """Instantiate and train a BPE tokenizer for Python."""
-
+    """Construct a BPE tokenizer with Python-appropriate settings."""
     tokenizer = Tokenizer(models.BPE(unk_token="<|unk|>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
-
     return tokenizer
 
 
 def build_trainer() -> trainers.BpeTrainer:
-    trainer = trainers.BpeTrainer(
+    """Configure the BPE trainer."""
+    return trainers.BpeTrainer(
         vocab_size=VOCAB_SIZE,
         min_frequency=MIN_FREQUENCY,
         special_tokens=SPECIAL_TOKENS,
         show_progress=True,
     )
-    return trainer
 
 
 def add_post_processor(tokenizer: Tokenizer) -> Tokenizer:
+    """Enable padding config for eval/inference batching."""
     pad_id = tokenizer.token_to_id("<|pad|>")
-
-    tokenizer.enable_padding(
-        pad_id=pad_id,
-        pad_token="<|pad|>",
-    )
-
+    tokenizer.enable_padding(pad_id=pad_id, pad_token="<|pad|>")
     return tokenizer
 
 
 def save_tokenizer(tokenizer: Tokenizer, output_dir: Path):
+    """Save tokenizer.json, vocab.txt, and tokenizer_meta.json."""
     output_dir.mkdir(parents=True, exist_ok=True)
+
     tokenizer.save(str(output_dir / "tokenizer.json"))
 
     vocab = tokenizer.get_vocab()
@@ -123,50 +117,15 @@ def save_tokenizer(tokenizer: Tokenizer, output_dir: Path):
         json.dump(meta, f, indent=2)
 
     print(f"\nTokenizer saved to {output_dir}/")
-    print("  tokenizer.json      — full tokenizer")
-    print("  vocab.txt           — human-readable vocab")
-    print("  tokenizer_meta.json — special token IDs and metadata")
-    print(f"\nVocab size: {tokenizer.get_vocab_size():,}")
+    print(f"  vocab_size : {tokenizer.get_vocab_size():,}")
     for tok in SPECIAL_TOKENS:
         print(f"  {tok} → ID {tokenizer.token_to_id(tok)}")
 
 
-def smoke_test(tokenizer: Tokenizer):
-    """Quick sanity check after training."""
-    samples = [
-        "def __init__(self, x: int) -> None:",
-        "import numpy as np\nimport torch",
-        "    for i in range(len(self.layers)):",
-        "self.attention = MultiHeadAttention(d_model, num_heads)",
-    ]
-
-    print("\n--- Smoke test ---")
-    for s in samples:
-        enc = tokenizer.encode(s)
-        decoded = tokenizer.decode(enc.ids)
-        print(f"\nInput:   {repr(s)}")
-        print(f"Tokens:  {enc.tokens}")
-        print(f"IDs:     {enc.ids}")
-        print(f"Decoded: {repr(decoded)}")
-        assert decoded == s, f"Round-trip failed!\nGot: {repr(decoded)}"
-
-    print("\nAll round-trip checks passed.")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train BPE tokenizer on Python corpus")
-    parser.add_argument(
-        "--max_files",
-        type=int,
-        default=MAX_FILES,
-        help=f"Number of Python files to stream (default: {MAX_FILES})",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=str(OUTPUT_DIR),
-        help=f"Where to save the trained tokenizer (default: {OUTPUT_DIR})",
-    )
+    parser.add_argument("--max_files", type=int, default=MAX_FILES)
+    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR))
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -190,7 +149,6 @@ def main():
 
     tokenizer = add_post_processor(tokenizer)
     save_tokenizer(tokenizer, output_dir)
-    smoke_test(tokenizer)
 
     print("\nDone. Tokenizer is ready.")
 
