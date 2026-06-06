@@ -1,6 +1,3 @@
-# Architecture — single source of truth
-# Referenced by model, train, eval, and inference code
-
 n_layers: 24
 d_model: 512
 n_heads_q: 8

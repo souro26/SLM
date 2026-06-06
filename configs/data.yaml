@@ -1,5 +1,4 @@
 # Data pipeline config
-# Download, filter, deduplicate, tokenize, curriculum sort, pack into flat token array
 
 seed: 42
 tokenizer_path: tokenizer/artifacts/tokenizer.json

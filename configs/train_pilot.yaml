@@ -1,7 +1,4 @@
-# Pilot training run — 2B tokens
-# Run this first. Verify loss curve, gradient norms, no spikes.
-# Only commit to full run if pilot looks healthy.
-
+# Pilot training run
 run_name: "slm-pilot-001"
 seed: 42
 

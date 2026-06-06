@@ -1,6 +1,4 @@
-# Full training run — 10B tokens
-# Only run after pilot looks healthy.
-
+# Full training run
 run_name: "slm-full-001"
 seed: 42
 
