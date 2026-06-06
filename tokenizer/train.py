@@ -28,25 +28,25 @@ SPECIAL_TOKENS = [
 
 
 def iter_python_files(max_files: int):
-    """Stream Python source files from The Stack v2."""
+    """Stream Python source files from nampdn-ai/tiny-codes."""
     try:
         from datasets import load_dataset
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
-    print(f"Streaming The Stack v2 (Python), sampling up to {max_files:,} files...")
+    print(f"Streaming nampdn-ai/tiny-codes (Python), sampling up to {max_files:,} files...")
 
     ds = load_dataset(
-        "bigcode/the-stack-v2",
-        "Python",
-        split="train",
+        "nampdn-ai/tiny-codes",
         streaming=True,
-        trust_remote_code=True,
+        split="train",
     )
 
     count = 0
     for sample in ds:
-        content = sample.get("content", "") or sample.get("text", "")
+        if sample.get("programming_language") != "Python":
+            continue
+        content = sample.get("response", "")
         if not content or len(content) < 50:
             continue
         yield content
