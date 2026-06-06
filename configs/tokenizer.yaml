@@ -1,6 +1,11 @@
 vocab_size: 32000
-corpus_dir: data/raw/tokenizer_corpus
-output_dir: tokenizer/artifacts
+output_dir: tokenizer/trained
+
+dataset: nampdn-ai/tiny-codes
+dataset_language_field: programming_language
+dataset_language_value: Python
+dataset_content_field: response
+max_files: 200000
 
 special_tokens:
   - "<|endoffile|>"
