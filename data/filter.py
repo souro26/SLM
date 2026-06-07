@@ -2,40 +2,23 @@
 data/filter.py
 
 Quality filters for Python source files.
-All filters are applied to The Stack v2 files.
-Stack Overflow filtering is already handled in download.py.
+Applied to all Stack v1 files. Stack Overflow filtering is
+already handled in download.py — don't run these filters on SO docs.
 
 Filters applied in order (cheapest first):
     1. Minimum length         — skip near-empty files
-    2. ast.parse() validity   — hard filter, discard broken syntax
-    3. Line length            — filter minified code
-    4. Comment-to-code ratio  — filter undocumented garbage and comment-only files
-    5. Docstring presence     — proxy for intentional, well-written code
-    6. Minimum stars          — proxy for repo quality (if metadata available)
+    2. Line length            — filter minified / generated code
+    3. Comment-to-code ratio  — filter undocumented garbage and comment-only files
+    4. ast.parse() validity   — hard filter, discard broken syntax (expensive, runs once)
+    5. Docstring presence     — proxy for intentional, well-written code (reuses parse tree)
+
+Note on ordering: ast.parse() is the most expensive operation. All cheap
+string-based checks run first so broken/garbage files are discarded before
+we pay the cost of parsing. Once we parse, we reuse the tree for the
+docstring check — we never parse the same file twice.
 
 Usage:
-    from data.filter import is_quality_file, filter_stream
-
-    for text in filter_stream(stream_stack()):
-        # text passed all filters
-        ...
-""" """
-data/filter.py
-
-Quality filters for Python source files.
-All filters are applied to The Stack v2 files.
-Stack Overflow filtering is already handled in download.py.
-
-Filters applied in order (cheapest first):
-    1. Minimum length         — skip near-empty files
-    2. ast.parse() validity   — hard filter, discard broken syntax
-    3. Line length            — filter minified code
-    4. Comment-to-code ratio  — filter undocumented garbage and comment-only files
-    5. Docstring presence     — proxy for intentional, well-written code
-    6. Minimum stars          — proxy for repo quality (if metadata available)
-
-Usage:
-    from data.filter import is_quality_file, filter_stream
+    from data.filter import filter_stream
 
     for text in filter_stream(stream_stack()):
         # text passed all filters
@@ -43,15 +26,19 @@ Usage:
 """
 
 import ast
+import logging
 from collections.abc import Iterator
+
+logger = logging.getLogger(__name__)
 
 MIN_CHARS = 100
 MIN_LINES = 5
 MAX_LINE_LENGTH = 1000
 MAX_LONG_LINE_FRACTION = 0.2
 MIN_COMMENT_RATIO = 0.01
-MAX_COMMENT_RATIO = 0.8
-MIN_STARS = 1
+MAX_COMMENT_RATIO = 0.80
+
+_LOG_EVERY = 10_000
 
 
 def is_long_enough(source: str) -> bool:
@@ -63,68 +50,59 @@ def is_long_enough(source: str) -> bool:
     return True
 
 
-def is_valid_syntax(source: str) -> bool:
-    """Discard files that fail ast.parse()."""
-    try:
-        ast.parse(source)
-        return True
-    except (SyntaxError, ValueError):
-        return False
-
-
 def has_acceptable_line_lengths(source: str) -> bool:
-    """Filter out undocumented code or only comment files."""
+    """Filter minified or generated code."""
     lines = source.splitlines()
     if not lines:
         return False
-
     long_lines = sum(1 for line in lines if len(line) > MAX_LINE_LENGTH)
     fraction = long_lines / len(lines)
     return fraction <= MAX_LONG_LINE_FRACTION
 
 
 def has_acceptable_comment_ratio(source: str) -> bool:
-    """Filter out undocumented code or the comment only files."""
+    """Filter files by comment ratio."""
     lines = source.splitlines()
     non_blank = [line for line in lines if line.strip()]
     if not non_blank:
         return False
-
     comment_lines = sum(1 for line in non_blank if line.strip().startswith("#"))
     ratio = comment_lines / len(non_blank)
     return MIN_COMMENT_RATIO <= ratio <= MAX_COMMENT_RATIO
 
 
-def has_docstring(source: str) -> bool:
-    """Check if the file has atleast one docstring."""
+def _parse(source: str) -> ast.Module | None:
+    """Parse source into an AST."""
     try:
-        tree = ast.parse(source)
+        return ast.parse(source)
     except (SyntaxError, ValueError):
-        return False
+        return None
 
+
+def has_valid_syntax(source: str) -> bool:
+    """Discard files that fail ast.parse()."""
+    return _parse(source) is not None
+
+
+def has_docstring(tree: ast.Module) -> bool:
+    """Check if file contains a docstring."""
     if ast.get_docstring(tree):
         return True
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        if isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+        ) and ast.get_docstring(node):
             return True
 
     return False
 
 
-def has_enough_stars(stars: int | None) -> bool:
-    """Filter for number of stars."""
-    if stars is None:
-        return True
-    return stars >= MIN_STARS
-
-
 def is_quality_file(
     source: str,
-    stars: int | None = None,
     require_docstring: bool = True,
 ) -> bool:
-    """Run all filters on a single source file."""
+    """Run all filters on a source file."""
     if not is_long_enough(source):
         return False
 
@@ -134,13 +112,11 @@ def is_quality_file(
     if not has_acceptable_comment_ratio(source):
         return False
 
-    if not has_enough_stars(stars):
+    tree = _parse(source)
+    if tree is None:
         return False
 
-    if require_docstring and not has_docstring(source):
-        return False
-
-    if not is_valid_syntax(source):
+    if require_docstring and not has_docstring(tree):
         return False
 
     return True
@@ -148,24 +124,138 @@ def is_quality_file(
 
 def filter_stream(
     source_iter: Iterator[str],
-    stars_iter: Iterator[int | None] | None = None,
     require_docstring: bool = True,
-    log_every: int = 10_000,
 ) -> Iterator[str]:
-    """Apply quality filters to a stream of source files."""
+    """Apply quality filters to a source stream."""
     total = 0
     passed = 0
 
+    rejected_length = 0
+    rejected_line_length = 0
+    rejected_comment_ratio = 0
+    rejected_syntax = 0
+    rejected_docstring = 0
+
     for source in source_iter:
-        stars = next(stars_iter) if stars_iter else None
         total += 1
 
-        if is_quality_file(source, stars=stars, require_docstring=require_docstring):
-            passed += 1
-            yield source
+        if not is_long_enough(source):
+            rejected_length += 1
+            if total % _LOG_EVERY == 0:
+                _log_progress(
+                    total,
+                    passed,
+                    rejected_length,
+                    rejected_line_length,
+                    rejected_comment_ratio,
+                    rejected_syntax,
+                    rejected_docstring,
+                )
+            continue
 
-        if total % log_every == 0:
-            rate = passed / total * 100
-            print(f"  filter: {total:,} processed, {passed:,} passed ({rate:.1f}%)")
+        if not has_acceptable_line_lengths(source):
+            rejected_line_length += 1
+            if total % _LOG_EVERY == 0:
+                _log_progress(
+                    total,
+                    passed,
+                    rejected_length,
+                    rejected_line_length,
+                    rejected_comment_ratio,
+                    rejected_syntax,
+                    rejected_docstring,
+                )
+            continue
 
-    print(f"Filter done. {passed:,} / {total:,} files passed ({passed/max(total,1)*100:.1f}%)")
+        if not has_acceptable_comment_ratio(source):
+            rejected_comment_ratio += 1
+            if total % _LOG_EVERY == 0:
+                _log_progress(
+                    total,
+                    passed,
+                    rejected_length,
+                    rejected_line_length,
+                    rejected_comment_ratio,
+                    rejected_syntax,
+                    rejected_docstring,
+                )
+            continue
+
+        tree = _parse(source)
+        if tree is None:
+            rejected_syntax += 1
+            if total % _LOG_EVERY == 0:
+                _log_progress(
+                    total,
+                    passed,
+                    rejected_length,
+                    rejected_line_length,
+                    rejected_comment_ratio,
+                    rejected_syntax,
+                    rejected_docstring,
+                )
+            continue
+
+        if require_docstring and not has_docstring(tree):
+            rejected_docstring += 1
+            if total % _LOG_EVERY == 0:
+                _log_progress(
+                    total,
+                    passed,
+                    rejected_length,
+                    rejected_line_length,
+                    rejected_comment_ratio,
+                    rejected_syntax,
+                    rejected_docstring,
+                )
+            continue
+
+        passed += 1
+        if total % _LOG_EVERY == 0:
+            _log_progress(
+                total,
+                passed,
+                rejected_length,
+                rejected_line_length,
+                rejected_comment_ratio,
+                rejected_syntax,
+                rejected_docstring,
+            )
+        yield source
+
+    logger.info(
+        "filter done: %d processed, %d passed (%.1f%%) | "
+        "rejected: length=%d line_length=%d comment_ratio=%d syntax=%d docstring=%d",
+        total,
+        passed,
+        passed / max(total, 1) * 100,
+        rejected_length,
+        rejected_line_length,
+        rejected_comment_ratio,
+        rejected_syntax,
+        rejected_docstring,
+    )
+
+
+def _log_progress(
+    total: int,
+    passed: int,
+    rejected_length: int,
+    rejected_line_length: int,
+    rejected_comment_ratio: int,
+    rejected_syntax: int,
+    rejected_docstring: int,
+) -> None:
+    """Log a progress line. Called every _LOG_EVERY files."""
+    logger.info(
+        "filter: %d processed, %d passed (%.1f%%) | "
+        "rejected: length=%d line_len=%d comment=%d syntax=%d docstring=%d",
+        total,
+        passed,
+        passed / max(total, 1) * 100,
+        rejected_length,
+        rejected_line_length,
+        rejected_comment_ratio,
+        rejected_syntax,
+        rejected_docstring,
+    )
