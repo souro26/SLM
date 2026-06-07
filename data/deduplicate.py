@@ -29,15 +29,20 @@ Usage:
         ...
 """
 
+import logging
 import re
 import unicodedata
 from collections.abc import Iterator
 
 from datasketch import MinHash, MinHashLSH
 
+logger = logging.getLogger(__name__)
+
 NUM_PERM = 128
 THRESHOLD = 0.85
 SHINGLE_SIZE = 5
+
+_LOG_EVERY = 10_000
 
 
 def normalize(source: str) -> str:
@@ -48,7 +53,7 @@ def normalize(source: str) -> str:
 
 
 def shingle(source: str, size: int = SHINGLE_SIZE) -> set:
-    """Convert source code to a set of shingles."""
+    """Convert source code to a set of character n-grams (shingles)."""
     source = normalize(source)
     if len(source) < size:
         return {source}
@@ -71,42 +76,50 @@ class Deduplicator:
         self._lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
         self._seen = 0
         self._duplicates = 0
+        logger.info(
+            "Deduplicator initialised (threshold=%.2f, num_perm=%d)",
+            threshold,
+            num_perm,
+        )
 
     def is_unique(self, source: str) -> bool:
         """Check if source is a near-duplicate of anything seen so far."""
         m = make_minhash(source)
         self._seen += 1
 
-        results = self._lsh.query(m)
-        if results:
+        if self._lsh.query(m):
             self._duplicates += 1
             return False
 
-        key = str(self._seen)
-        self._lsh.insert(key, m)
+        self._lsh.insert(str(self._seen), m)
         return True
 
     def filter_stream(
         self,
         source_iter: Iterator[str],
-        log_every: int = 10_000,
     ) -> Iterator[str]:
         """Apply deduplication to a stream of source files."""
         for source in source_iter:
-            if self.is_unique(source):
-                yield source
+            is_unique = self.is_unique(source)
 
-            if self._seen % log_every == 0:
+            if self._seen % _LOG_EVERY == 0:
                 dup_rate = self._duplicates / self._seen * 100
-                print(
-                    f"  dedup: {self._seen:,} seen, "
-                    f"{self._duplicates:,} duplicates removed ({dup_rate:.1f}%)"
+                logger.info(
+                    "dedup: %d seen, %d duplicates removed (%.1f%%)",
+                    self._seen,
+                    self._duplicates,
+                    dup_rate,
                 )
 
-        print(
-            f"Dedup done. "
-            f"{self._seen - self._duplicates:,} unique / {self._seen:,} total "
-            f"({self._duplicates:,} duplicates removed)"
+            if is_unique:
+                yield source
+
+        logger.info(
+            "dedup done: %d unique / %d total (%d duplicates removed, %.1f%%)",
+            self._seen - self._duplicates,
+            self._seen,
+            self._duplicates,
+            self._duplicates / max(self._seen, 1) * 100,
         )
 
     @property
