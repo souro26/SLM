@@ -23,7 +23,12 @@ Usage:
         print(text[:100])
 """
 
+import logging
 from collections.abc import Iterator
+
+logger = logging.getLogger(__name__)
+
+_LOG_EVERY = 10_000
 
 
 def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
@@ -43,6 +48,8 @@ def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
         "psf/requests",
     }
 
+    logger.info("stream_stack: starting (max_docs=%d)", max_docs)
+
     ds = load_dataset(
         "bigcode/the-stack",
         data_dir="data/python",
@@ -51,17 +58,24 @@ def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
     )
 
     count = 0
+    skipped = 0
     for sample in ds:
         repo = sample.get("max_stars_repo_name") or ""
         if repo in _excluded_repos:
+            skipped += 1
             continue
         content = sample.get("content") or ""
         if not content:
+            skipped += 1
             continue
         yield content
         count += 1
+        if count % _LOG_EVERY == 0:
+            logger.info("stream_stack: %d yielded, %d skipped", count, skipped)
         if count >= max_docs:
             break
+
+    logger.info("stream_stack: done. %d yielded, %d skipped", count, skipped)
 
 
 def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
@@ -73,7 +87,14 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
 
     max_collect = max_docs * 5
 
+    logger.info(
+        "stream_stackoverflow: starting (max_docs=%d, max_collect=%d)",
+        max_docs,
+        max_collect,
+    )
+
     accepted: dict[int, str] = {}
+    scanned_pass1 = 0
 
     ds = load_dataset(
         "mikex86/stackoverflow-posts",
@@ -85,8 +106,16 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
         if len(accepted) >= max_collect:
             break
 
+        scanned_pass1 += 1
+        if scanned_pass1 % _LOG_EVERY == 0:
+            logger.info(
+                "stream_stackoverflow pass 1: %d scanned, %d collected",
+                scanned_pass1,
+                len(accepted),
+            )
+
         post_type = sample.get("PostTypeId")
-        if post_type != 1:  # questions only
+        if post_type != 1:
             continue
 
         score = sample.get("Score") or 0
@@ -112,8 +141,17 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
 
         accepted[accepted_id] = body
 
+    logger.info(
+        "stream_stackoverflow pass 1 done: %d scanned, %d questions collected",
+        scanned_pass1,
+        len(accepted),
+    )
+
     if not accepted:
+        logger.warning("stream_stackoverflow: no questions collected — yielding nothing")
         return
+
+    logger.info("stream_stackoverflow pass 2: scanning for accepted answers")
 
     ds2 = load_dataset(
         "mikex86/stackoverflow-posts",
@@ -122,12 +160,21 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
     )
 
     count = 0
+    scanned_pass2 = 0
     for sample in ds2:
         if count >= max_docs:
             break
 
+        scanned_pass2 += 1
+        if scanned_pass2 % _LOG_EVERY == 0:
+            logger.info(
+                "stream_stackoverflow pass 2: %d scanned, %d yielded",
+                scanned_pass2,
+                count,
+            )
+
         post_type = sample.get("PostTypeId")
-        if post_type != 2:  # answers only
+        if post_type != 2:
             continue
 
         answer_id = sample.get("Id")
@@ -143,6 +190,12 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
         yield doc
         count += 1
 
+    logger.info(
+        "stream_stackoverflow done. %d yielded from %d pass-2 rows scanned",
+        count,
+        scanned_pass2,
+    )
+
 
 def stream_docs(max_docs: int = 50_000) -> Iterator[str]:
     """Stream Python stdlib source from The Stack."""
@@ -153,6 +206,8 @@ def stream_docs(max_docs: int = 50_000) -> Iterator[str]:
 
     _stdlib_repos = {"python/cpython", "python/typeshed"}
 
+    logger.info("stream_docs: starting (max_docs=%d)", max_docs)
+
     ds = load_dataset(
         "bigcode/the-stack",
         data_dir="data/python",
@@ -161,17 +216,24 @@ def stream_docs(max_docs: int = 50_000) -> Iterator[str]:
     )
 
     count = 0
+    skipped = 0
     for sample in ds:
         repo = sample.get("max_stars_repo_name") or ""
         if repo not in _stdlib_repos:
+            skipped += 1
             continue
         content = sample.get("content") or ""
         if not content:
+            skipped += 1
             continue
         yield content
         count += 1
+        if count % _LOG_EVERY == 0:
+            logger.info("stream_docs: %d yielded, %d skipped", count, skipped)
         if count >= max_docs:
             break
+
+    logger.info("stream_docs: done. %d yielded, %d skipped", count, skipped)
 
 
 def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
@@ -189,6 +251,8 @@ def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
         "psf/requests",
     }
 
+    logger.info("stream_curated: starting (max_docs=%d)", max_docs)
+
     ds = load_dataset(
         "bigcode/the-stack",
         data_dir="data/python",
@@ -197,14 +261,21 @@ def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
     )
 
     count = 0
+    skipped = 0
     for sample in ds:
         repo = sample.get("max_stars_repo_name") or ""
         if repo not in _curated_repos:
+            skipped += 1
             continue
         content = sample.get("content") or ""
         if not content:
+            skipped += 1
             continue
         yield content
         count += 1
+        if count % _LOG_EVERY == 0:
+            logger.info("stream_curated: %d yielded, %d skipped", count, skipped)
         if count >= max_docs:
             break
+
+    logger.info("stream_curated: done. %d yielded, %d skipped", count, skipped)
