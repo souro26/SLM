@@ -5,40 +5,57 @@ Streams raw text from all four data sources. Writes nothing to disk.
 Each function is a generator — yields one document at a time.
 
 Sources:
-    - The Stack v2 (Python)                          70% of final mix
+    - The Stack v1 (Python)                          70% of final mix
     - Stack Overflow Python Q&A                      15%
-    - Python docs + stdlib source                    10%
+    - Python docs + stdlib source (cpython/typeshed) 10%
     - Curated open source (NumPy, PyTorch, etc.)      5%
+
+Confirmed field names (verified against live datasets):
+    The Stack v1:   content, max_stars_repo_name, max_stars_count,
+                    max_line_length, avg_line_length
+    SO posts:       Id, PostTypeId, AcceptedAnswerId, ParentId,
+                    Score, Body, Tags
 
 Usage:
     from data.download import stream_stack, stream_stackoverflow, stream_docs, stream_curated
 
-    for text in stream_stack(max_docs=10000):
+    for text in stream_stack(max_docs=1000):
         print(text[:100])
 """
 
-import re
 from collections.abc import Iterator
 
 
 def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
-    """Stream Python source files from The Stack v2 (HuggingFace)."""
+    """Stream Python source files from The Stack."""
     try:
         from datasets import load_dataset
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
+    _excluded_repos = {
+        "python/cpython",
+        "python/typeshed",
+        "numpy/numpy",
+        "pytorch/pytorch",
+        "pandas-dev/pandas",
+        "tiangolo/fastapi",
+        "psf/requests",
+    }
+
     ds = load_dataset(
-        "bigcode/the-stack-v2",
-        "Python",
+        "bigcode/the-stack",
+        data_dir="data/python",
         split="train",
         streaming=True,
-        trust_remote_code=True,
     )
 
     count = 0
     for sample in ds:
-        content = sample.get("content", "") or sample.get("text", "")
+        repo = sample.get("max_stars_repo_name") or ""
+        if repo in _excluded_repos:
+            continue
+        content = sample.get("content") or ""
         if not content:
             continue
         yield content
@@ -54,95 +71,117 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
+    max_collect = max_docs * 5
+
+    accepted: dict[int, str] = {}
+
     ds = load_dataset(
-        "keirp/stackoverflow-python-dataset",
+        "mikex86/stackoverflow-posts",
         split="train",
         streaming=True,
-        trust_remote_code=True,
+    )
+
+    for sample in ds:
+        if len(accepted) >= max_collect:
+            break
+
+        post_type = sample.get("PostTypeId")
+        if post_type != 1:  # questions only
+            continue
+
+        score = sample.get("Score") or 0
+        if score < 5:
+            continue
+
+        accepted_id = sample.get("AcceptedAnswerId")
+        if accepted_id is None:
+            continue
+
+        tags = sample.get("Tags") or []
+        if isinstance(tags, list):
+            has_python = any("python" in t.lower() for t in tags)
+        else:
+            has_python = "python" in str(tags).lower()
+
+        if not has_python:
+            continue
+
+        body = sample.get("Body") or ""
+        if not body:
+            continue
+
+        accepted[accepted_id] = body
+
+    if not accepted:
+        return
+
+    ds2 = load_dataset(
+        "mikex86/stackoverflow-posts",
+        split="train",
+        streaming=True,
     )
 
     count = 0
-    for sample in ds:
-        question_score = sample.get("question_score", 0) or 0
-        if question_score < 5:
-            continue
-
-        accepted_answer = sample.get("accepted_answer", "") or ""
-        if not accepted_answer:
-            continue
-
-        question_body = _strip_html(sample.get("question_body", "") or "")
-        answer_body = _strip_html(accepted_answer)
-
-        if not question_body or not answer_body:
-            continue
-
-        doc = f"Question: {question_body}\n\nAnswer:\n{answer_body}"
-        yield doc
-        count += 1
+    for sample in ds2:
         if count >= max_docs:
             break
 
+        post_type = sample.get("PostTypeId")
+        if post_type != 2:  # answers only
+            continue
+
+        answer_id = sample.get("Id")
+        if answer_id not in accepted:
+            continue
+
+        answer_body = sample.get("Body") or ""
+        if not answer_body:
+            continue
+
+        question_body = accepted[answer_id]
+        doc = f"Question:\n{question_body}\n\nAnswer:\n{answer_body}"
+        yield doc
+        count += 1
+
 
 def stream_docs(max_docs: int = 50_000) -> Iterator[str]:
-    """Stream Python documentation and stdlib source code."""
+    """Stream Python stdlib source from The Stack."""
     try:
         from datasets import load_dataset
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
-    count = 0
+    _stdlib_repos = {"python/cpython", "python/typeshed"}
 
     ds = load_dataset(
-        "bigcode/the-stack-v2",
-        "Python",
+        "bigcode/the-stack",
+        data_dir="data/python",
         split="train",
         streaming=True,
-        trust_remote_code=True,
     )
 
-    stdlib_repos = {"python/cpython", "python/typeshed"}
-
+    count = 0
     for sample in ds:
-        repo = sample.get("repo_name", "") or ""
-        if repo not in stdlib_repos:
+        repo = sample.get("max_stars_repo_name") or ""
+        if repo not in _stdlib_repos:
             continue
-        content = sample.get("content", "") or sample.get("text", "")
+        content = sample.get("content") or ""
         if not content:
             continue
         yield content
         count += 1
         if count >= max_docs:
-            return
-
-    try:
-        docs_ds = load_dataset(
-            "bigcode/the-stack-v2-dedup",
-            "Python",
-            split="train",
-            streaming=True,
-            trust_remote_code=True,
-        )
-        for sample in docs_ds:
-            content = sample.get("content", "") or ""
-            if not content:
-                continue
-            yield content
-            count += 1
-            if count >= max_docs:
-                return
-    except Exception:
-        pass
+            break
 
 
 def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
-    """Stream source code from high-quality, idiomatic Python projects."""
+    """Stream source code from idiomatic Python projects."""
     try:
         from datasets import load_dataset
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
-    curated_repos = {
+    _curated_repos = {
         "numpy/numpy",
         "pytorch/pytorch",
         "pandas-dev/pandas",
@@ -151,66 +190,21 @@ def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
     }
 
     ds = load_dataset(
-        "bigcode/the-stack-v2",
-        "Python",
+        "bigcode/the-stack",
+        data_dir="data/python",
         split="train",
         streaming=True,
-        trust_remote_code=True,
     )
 
     count = 0
     for sample in ds:
-        repo = sample.get("repo_name", "") or ""
-        if repo not in curated_repos:
+        repo = sample.get("max_stars_repo_name") or ""
+        if repo not in _curated_repos:
             continue
-        content = sample.get("content", "") or sample.get("text", "")
+        content = sample.get("content") or ""
         if not content:
             continue
         yield content
         count += 1
         if count >= max_docs:
             break
-
-
-def _strip_html(text: str) -> str:
-    """Strip HTML tags from Stack Overflow post bodies."""
-    if not text:
-        return ""
-
-    text = re.sub(
-        r"<pre[^>]*><code[^>]*>(.*?)</code></pre>",
-        lambda m: "\n" + _unescape_html(m.group(1)) + "\n",
-        text,
-        flags=re.DOTALL,
-    )
-
-    text = re.sub(
-        r"<code[^>]*>(.*?)</code>",
-        lambda m: _unescape_html(m.group(1)),
-        text,
-        flags=re.DOTALL,
-    )
-
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = _unescape_html(text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r" {2,}", " ", text)
-
-    return text.strip()
-
-
-def _unescape_html(text: str) -> str:
-    """Unescape common HTML entities."""
-    entities = {
-        "&amp;": "&",
-        "&lt;": "<",
-        "&gt;": ">",
-        "&quot;": '"',
-        "&#39;": "'",
-        "&nbsp;": " ",
-        "&#x27;": "'",
-        "&#x2F;": "/",
-    }
-    for entity, char in entities.items():
-        text = text.replace(entity, char)
-    return text
