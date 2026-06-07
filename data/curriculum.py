@@ -5,7 +5,7 @@ Sorts deduplicated Python files into three training stages by complexity.
 The model sees simple code first, then complex code, then the best code last.
 
 Why curriculum learning:
-    A model trained on random shuffled data has to simultaneously learn basic
+    A model trained on randomly shuffled data has to simultaneously learn basic
     syntax AND complex patterns like async, decorators, metaclasses. Starting
     with simple, well-structured code lets the model build syntactic grounding
     first. Complex patterns are introduced once the basics are stable.
@@ -22,22 +22,23 @@ Stages:
               top Stack Overflow answers. Upsampled 3x at end of training.
 
 Complexity measured by:
-    - Cyclomatic complexity (radon)
-    - Number of nested scopes
-    - Number of unique identifiers
+    - Cyclomatic complexity (radon cc_visit, falls back to AST branch count)
+    - Number of nested scopes (AST walk)
+    - Number of unique identifiers (AST walk)
 
 Usage:
     from data.curriculum import score_complexity, assign_stage, split_by_stage
-
-    stage = assign_stage(source)
 
     stage1, stage2, stage3 = split_by_stage(deduplicated_stream)
 """
 
 import ast
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 try:
     from radon.complexity import cc_visit
@@ -45,9 +46,15 @@ try:
     HAS_RADON = True
 except ImportError:
     HAS_RADON = False
+    logger.warning(
+        "radon not installed — falling back to AST branch count for cyclomatic complexity. "
+        "Install with: pip install radon"
+    )
 
+_LOG_EVERY = 10_000
 
 Stage = Literal[1, 2, 3]
+
 STAGE1_MAX_SCORE = 5.0
 STAGE2_MAX_SCORE = 15.0
 STAGE3_UPSAMPLE = 3
@@ -127,22 +134,20 @@ def _max_nesting_depth(source: str) -> int:
 
 
 def _unique_identifiers(source: str) -> int:
-    """Number of distinct names in the file."""
+    """Number of distinct names (variables, functions, classes) in the file."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return 0
-
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     return len(names)
 
 
-def score_complexity(source: str) -> "ComplexityScore":
+def score_complexity(source: str) -> ComplexityScore:
     """Compute a composite complexity score for a source file."""
     cyclomatic = _cyclomatic_complexity(source)
     nesting = _max_nesting_depth(source)
     identifiers = _unique_identifiers(source)
-
     composite = 0.5 * cyclomatic + 0.3 * nesting + 0.2 * (identifiers / 20)
 
     return ComplexityScore(
@@ -162,22 +167,19 @@ def assign_stage(source: str, source_tag: str = "") -> Stage:
 
     if score.composite <= STAGE1_MAX_SCORE:
         return 1
-    elif score.composite <= STAGE2_MAX_SCORE:
-        return 2
     else:
         return 2
 
 
 def split_by_stage(
     source_iter: Iterator[tuple[str, str]],
-    log_every: int = 10_000,
 ) -> tuple[list[str], list[str], list[str]]:
     """Split a deduplicated stream into three stage lists."""
     stage1: list[str] = []
     stage2: list[str] = []
     stage3: list[str] = []
-
     total = 0
+
     for source, source_tag in source_iter:
         stage = assign_stage(source, source_tag)
         total += 1
@@ -189,19 +191,24 @@ def split_by_stage(
         else:
             stage3.append(source)
 
-        if total % log_every == 0:
-            print(
-                f"  curriculum: {total:,} processed — "
-                f"stage1={len(stage1):,}, "
-                f"stage2={len(stage2):,}, "
-                f"stage3={len(stage3):,}"
+        if total % _LOG_EVERY == 0:
+            logger.info(
+                "curriculum: %d processed — stage1=%d, stage2=%d, stage3=%d",
+                total,
+                len(stage1),
+                len(stage2),
+                len(stage3),
             )
 
-    print(
-        f"Curriculum done. {total:,} files — "
-        f"stage1={len(stage1):,}, "
-        f"stage2={len(stage2):,}, "
-        f"stage3={len(stage3):,}"
+    logger.info(
+        "curriculum done: %d files — stage1=%d (%.1f%%), stage2=%d (%.1f%%), stage3=%d (%.1f%%)",
+        total,
+        len(stage1),
+        len(stage1) / max(total, 1) * 100,
+        len(stage2),
+        len(stage2) / max(total, 1) * 100,
+        len(stage3),
+        len(stage3) / max(total, 1) * 100,
     )
 
     return stage1, stage2, stage3
@@ -213,7 +220,15 @@ def ordered_stream(
     stage3: list[str],
 ) -> Iterator[str]:
     """Yield files in curriculum order: Stage 1 → Stage 2 → Stage 3."""
+    logger.info(
+        "ordered_stream: yielding %d stage1, %d stage2, %d stage3 (×%d)",
+        len(stage1),
+        len(stage2),
+        len(stage3),
+        STAGE3_UPSAMPLE,
+    )
     yield from stage1
     yield from stage2
-    for _ in range(STAGE3_UPSAMPLE):
+    for i in range(STAGE3_UPSAMPLE):
+        logger.info("ordered_stream: stage3 pass %d / %d", i + 1, STAGE3_UPSAMPLE)
         yield from stage3
