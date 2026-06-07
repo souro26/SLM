@@ -8,9 +8,9 @@ Orchestrates the full data pipeline end to end:
     4. Assign curriculum stages
     5. Pack into flat binary token array
 
-Curated and stdlib sources are processed FIRST for dedup priority.
-This ensures high-quality files win in near-duplicate collisions — if a NumPy
-fork appears later in The Stack stream, it gets discarded, not the real thing.
+The Stack v1 is scanned ONCE via stream_stack_all() which routes files
+to stack/stdlib/curated tags in a single pass. This replaces the previous
+design of three separate full scans — 3x faster, 3x less network fragility.
 
 Output:
     data/processed/train.bin        — flat uint16 token array
@@ -31,20 +31,14 @@ from pathlib import Path
 
 from data.curriculum import STAGE3_UPSAMPLE, ordered_stream, split_by_stage
 from data.deduplicate import Deduplicator
-from data.download import (
-    stream_curated,
-    stream_docs,
-    stream_stack,
-    stream_stackoverflow,
-)
-from data.filter import filter_stream
+from data.download import stream_stack_all, stream_stackoverflow
+from data.filter import is_quality_file
 from data.pack import pack_to_binary, save_metadata
 from tokenizer.tokenizer import SLMTokenizer
 
 TOKENIZER_DIR = Path("tokenizer/trained")
 OUTPUT_DIR = Path("data/processed")
 TRAIN_FILE = OUTPUT_DIR / "train.bin"
-METADATA_FILE = OUTPUT_DIR / "metadata.json"
 
 FULL_STACK_DOCS = 500_000
 FULL_SO_DOCS = 200_000
@@ -68,7 +62,10 @@ def setup_logging(output_dir: Path) -> None:
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.INFO)
     console.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(message)s",
+            datefmt="%H:%M:%S",
+        )
     )
     root.addHandler(console)
 
@@ -82,7 +79,7 @@ def setup_logging(output_dir: Path) -> None:
     )
     root.addHandler(file_handler)
 
-    logging.info("Logging initialised. Log file: %s", log_path.resolve())
+    logging.info("logging initialised. log file: %s", log_path.resolve())
 
 
 logger = logging.getLogger(__name__)
@@ -95,21 +92,16 @@ def stream_all_sources(
     curated_limit: int,
 ) -> Iterator[tuple[str, str]]:
     """Yield source tuples from all four sources."""
-    logger.info("--- streaming curated repos (dedup priority) ---")
-    for text in stream_curated(max_docs=curated_limit):
-        yield text, "curated"
-
-    logger.info("--- streaming stdlib + docs ---")
-    for text in stream_docs(max_docs=docs_limit):
-        yield text, "stdlib"
+    logger.info("--- streaming The Stack v1 (single pass: stack + stdlib + curated) ---")
+    yield from stream_stack_all(
+        stack_limit=stack_limit,
+        docs_limit=docs_limit,
+        curated_limit=curated_limit,
+    )
 
     logger.info("--- streaming Stack Overflow ---")
     for text in stream_stackoverflow(max_docs=so_limit):
         yield text, "stackoverflow"
-
-    logger.info("--- streaming The Stack v1 ---")
-    for text in stream_stack(max_docs=stack_limit):
-        yield text, "stack"
 
 
 def build_clean_stream(
@@ -120,7 +112,7 @@ def build_clean_stream(
     for source, tag in raw_iter:
         require_docstring = tag == "stack"
 
-        if not filter_stream([source], require_docstring=require_docstring):
+        if not is_quality_file(source, require_docstring=require_docstring):
             continue
 
         if dedup.is_unique(source):
@@ -158,7 +150,7 @@ def run_pipeline(pilot: bool = False, yes: bool = False) -> None:
         print(f"\nFull run will write up to ~20GB to {TRAIN_FILE.resolve()}")
         confirm = input("Proceed? (y/n): ").strip().lower()
         if confirm != "y":
-            logger.info("Aborted by user.")
+            logger.info("aborted by user")
             return
 
     logger.info("loading tokenizer from %s", TOKENIZER_DIR)
@@ -209,7 +201,7 @@ def run_pipeline(pilot: bool = False, yes: bool = False) -> None:
     )
 
     if not stats:
-        logger.warning("pack_to_binary returned empty stats — something went wrong")
+        logger.warning("pack_to_binary returned empty — something went wrong")
         return
 
     save_metadata(OUTPUT_DIR, {**stats, "pilot": pilot}, stage_boundaries)

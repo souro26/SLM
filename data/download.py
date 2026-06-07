@@ -10,6 +10,12 @@ Sources:
     - Python docs + stdlib source (cpython/typeshed) 10%
     - Curated open source (NumPy, PyTorch, etc.)      5%
 
+Key design decision:
+    The Stack v1 is scanned ONCE via stream_stack_all(), which yields
+    (content, tag) tuples routing each file to stack/stdlib/curated
+    in a single pass. Previously three separate functions each did a
+    full scan — 3x the downloads, 3x the network fragility.
+
 Confirmed field names (verified against live datasets):
     The Stack v1:   content, max_stars_repo_name, max_stars_count,
                     max_line_length, avg_line_length
@@ -17,10 +23,10 @@ Confirmed field names (verified against live datasets):
                     Score, Body, Tags
 
 Usage:
-    from data.download import stream_stack, stream_stackoverflow, stream_docs, stream_curated
+    from data.download import stream_stack_all, stream_stackoverflow
 
-    for text in stream_stack(max_docs=1000):
-        print(text[:100])
+    for text, tag in stream_stack_all(stack_limit=5000, docs_limit=500, curated_limit=300):
+        print(tag, text[:80])
 """
 
 import logging
@@ -30,25 +36,35 @@ logger = logging.getLogger(__name__)
 
 _LOG_EVERY = 10_000
 
+_STDLIB_REPOS = {"python/cpython", "python/typeshed"}
 
-def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
-    """Stream Python source files from The Stack."""
+_CURATED_REPOS = {
+    "numpy/numpy",
+    "pytorch/pytorch",
+    "pandas-dev/pandas",
+    "tiangolo/fastapi",
+    "psf/requests",
+}
+
+
+def stream_stack_all(
+    stack_limit: int = 500_000,
+    docs_limit: int = 50_000,
+    curated_limit: int = 30_000,
+) -> Iterator[tuple[str, str]]:
+    """Single-pass stream over The Stack v1."""
     try:
         from datasets import load_dataset
     except ImportError as err:
         raise ImportError("pip install datasets") from err
 
-    _excluded_repos = {
-        "python/cpython",
-        "python/typeshed",
-        "numpy/numpy",
-        "pytorch/pytorch",
-        "pandas-dev/pandas",
-        "tiangolo/fastapi",
-        "psf/requests",
-    }
-
-    logger.info("stream_stack: starting (max_docs=%d)", max_docs)
+    logger.info(
+        "stream_stack_all: starting single pass "
+        "(stack_limit=%d, docs_limit=%d, curated_limit=%d)",
+        stack_limit,
+        docs_limit,
+        curated_limit,
+    )
 
     ds = load_dataset(
         "bigcode/the-stack",
@@ -57,25 +73,65 @@ def stream_stack(max_docs: int = 500_000) -> Iterator[str]:
         streaming=True,
     )
 
-    count = 0
+    stack_count = 0
+    docs_count = 0
+    curated_count = 0
+    scanned = 0
     skipped = 0
+
     for sample in ds:
-        repo = sample.get("max_stars_repo_name") or ""
-        if repo in _excluded_repos:
-            skipped += 1
-            continue
+        scanned += 1
+
+        if (
+            stack_count >= stack_limit
+            and docs_count >= docs_limit
+            and curated_count >= curated_limit
+        ):
+            break
+
         content = sample.get("content") or ""
         if not content:
             skipped += 1
             continue
-        yield content
-        count += 1
-        if count % _LOG_EVERY == 0:
-            logger.info("stream_stack: %d yielded, %d skipped", count, skipped)
-        if count >= max_docs:
-            break
 
-    logger.info("stream_stack: done. %d yielded, %d skipped", count, skipped)
+        repo = sample.get("max_stars_repo_name") or ""
+
+        if repo in _STDLIB_REPOS:
+            if docs_count >= docs_limit:
+                continue
+            docs_count += 1
+            yield content, "stdlib"
+
+        elif repo in _CURATED_REPOS:
+            if curated_count >= curated_limit:
+                continue
+            curated_count += 1
+            yield content, "curated"
+
+        else:
+            if stack_count >= stack_limit:
+                continue
+            stack_count += 1
+            yield content, "stack"
+
+        if scanned % _LOG_EVERY == 0:
+            logger.info(
+                "stream_stack_all: %d scanned — stack=%d, stdlib=%d, curated=%d, skipped=%d",
+                scanned,
+                stack_count,
+                docs_count,
+                curated_count,
+                skipped,
+            )
+
+    logger.info(
+        "stream_stack_all done: %d scanned — stack=%d, stdlib=%d, curated=%d, skipped=%d",
+        scanned,
+        stack_count,
+        docs_count,
+        curated_count,
+        skipped,
+    )
 
 
 def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
@@ -114,12 +170,9 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
                 len(accepted),
             )
 
-        post_type = sample.get("PostTypeId")
-        if post_type != 1:
+        if sample.get("PostTypeId") != 1:
             continue
-
-        score = sample.get("Score") or 0
-        if score < 5:
+        if (sample.get("Score") or 0) < 5:
             continue
 
         accepted_id = sample.get("AcceptedAnswerId")
@@ -131,7 +184,6 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
             has_python = any("python" in t.lower() for t in tags)
         else:
             has_python = "python" in str(tags).lower()
-
         if not has_python:
             continue
 
@@ -173,8 +225,7 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
                 count,
             )
 
-        post_type = sample.get("PostTypeId")
-        if post_type != 2:
+        if sample.get("PostTypeId") != 2:
             continue
 
         answer_id = sample.get("Id")
@@ -185,97 +236,12 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
         if not answer_body:
             continue
 
-        question_body = accepted[answer_id]
-        doc = f"Question:\n{question_body}\n\nAnswer:\n{answer_body}"
+        doc = f"Question:\n{accepted[answer_id]}\n\nAnswer:\n{answer_body}"
         yield doc
         count += 1
 
     logger.info(
-        "stream_stackoverflow done. %d yielded from %d pass-2 rows scanned",
+        "stream_stackoverflow done: %d yielded from %d pass-2 rows scanned",
         count,
         scanned_pass2,
     )
-
-
-def stream_docs(max_docs: int = 50_000) -> Iterator[str]:
-    """Stream Python stdlib source from The Stack."""
-    try:
-        from datasets import load_dataset
-    except ImportError as err:
-        raise ImportError("pip install datasets") from err
-
-    _stdlib_repos = {"python/cpython", "python/typeshed"}
-
-    logger.info("stream_docs: starting (max_docs=%d)", max_docs)
-
-    ds = load_dataset(
-        "bigcode/the-stack",
-        data_dir="data/python",
-        split="train",
-        streaming=True,
-    )
-
-    count = 0
-    skipped = 0
-    for sample in ds:
-        repo = sample.get("max_stars_repo_name") or ""
-        if repo not in _stdlib_repos:
-            skipped += 1
-            continue
-        content = sample.get("content") or ""
-        if not content:
-            skipped += 1
-            continue
-        yield content
-        count += 1
-        if count % _LOG_EVERY == 0:
-            logger.info("stream_docs: %d yielded, %d skipped", count, skipped)
-        if count >= max_docs:
-            break
-
-    logger.info("stream_docs: done. %d yielded, %d skipped", count, skipped)
-
-
-def stream_curated(max_docs: int = 30_000) -> Iterator[str]:
-    """Stream source code from idiomatic Python projects."""
-    try:
-        from datasets import load_dataset
-    except ImportError as err:
-        raise ImportError("pip install datasets") from err
-
-    _curated_repos = {
-        "numpy/numpy",
-        "pytorch/pytorch",
-        "pandas-dev/pandas",
-        "tiangolo/fastapi",
-        "psf/requests",
-    }
-
-    logger.info("stream_curated: starting (max_docs=%d)", max_docs)
-
-    ds = load_dataset(
-        "bigcode/the-stack",
-        data_dir="data/python",
-        split="train",
-        streaming=True,
-    )
-
-    count = 0
-    skipped = 0
-    for sample in ds:
-        repo = sample.get("max_stars_repo_name") or ""
-        if repo not in _curated_repos:
-            skipped += 1
-            continue
-        content = sample.get("content") or ""
-        if not content:
-            skipped += 1
-            continue
-        yield content
-        count += 1
-        if count % _LOG_EVERY == 0:
-            logger.info("stream_curated: %d yielded, %d skipped", count, skipped)
-        if count >= max_docs:
-            break
-
-    logger.info("stream_curated: done. %d yielded, %d skipped", count, skipped)
