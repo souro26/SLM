@@ -1,5 +1,5 @@
 """
-data/pipeline.py
+data/pipeline.py  (v3)
 
 Orchestrates the full data pipeline end to end:
     1. Stream raw source files from all four sources
@@ -8,9 +8,12 @@ Orchestrates the full data pipeline end to end:
     4. Assign curriculum stages
     5. Pack into flat binary token array
 
-The Stack v1 is scanned ONCE via stream_stack_all() which routes files
-to stack/stdlib/curated tags in a single pass. This replaces the previous
-design of three separate full scans — 3x faster, 3x less network fragility.
+v3 change: curated (NumPy, PyTorch, pandas, FastAPI, requests) and
+stdlib (cpython, typeshed) sources are now fetched DIRECTLY from GitHub
+via fetch_curated_repos() / fetch_stdlib_repos() instead of being hunted
+for inside The Stack's streamed shards. The Stack is only scanned once,
+for the general 70% sample, and exits as soon as that quota is hit —
+no more waiting on rare-repo hits buried in 206 shards.
 
 Output:
     data/processed/train.bin        — flat uint16 token array
@@ -31,7 +34,12 @@ from pathlib import Path
 
 from data.curriculum import STAGE3_UPSAMPLE, ordered_stream, split_by_stage
 from data.deduplicate import Deduplicator
-from data.download import stream_stack_all, stream_stackoverflow
+from data.download import (
+    fetch_curated_repos,
+    fetch_stdlib_repos,
+    stream_stack_all,
+    stream_stackoverflow,
+)
 from data.filter import is_quality_file
 from data.pack import pack_to_binary, save_metadata
 from tokenizer.tokenizer import SLMTokenizer
@@ -91,13 +99,23 @@ def stream_all_sources(
     docs_limit: int,
     curated_limit: int,
 ) -> Iterator[tuple[str, str]]:
-    """Yield source tuples from all four sources."""
-    logger.info("--- streaming The Stack v1 (single pass: stack + stdlib + curated) ---")
-    yield from stream_stack_all(
-        stack_limit=stack_limit,
-        docs_limit=docs_limit,
-        curated_limit=curated_limit,
-    )
+    """Yield (text, tag) tuples from all four sources.
+
+    Curated and stdlib are fetched directly from GitHub first — this is
+    fast (a handful of tarball downloads, no scanning). The Stack general
+    sample and Stack Overflow are streamed as before.
+    """
+    logger.info("--- fetching curated repos directly from GitHub ---")
+    for text in fetch_curated_repos(limit=curated_limit):
+        yield text, "curated"
+
+    logger.info("--- fetching stdlib repos directly from GitHub ---")
+    for text in fetch_stdlib_repos(limit=docs_limit):
+        yield text, "stdlib"
+
+    logger.info("--- streaming The Stack v1 (general sample only) ---")
+    for text in stream_stack_all(stack_limit=stack_limit):
+        yield text, "stack"
 
     logger.info("--- streaming Stack Overflow ---")
     for text in stream_stackoverflow(max_docs=so_limit):
