@@ -82,7 +82,7 @@ def _fetch_repo_py_files(repo: str, per_repo_limit: int) -> Iterator[str]:
             with urllib.request.urlopen(url, timeout=60) as resp:
                 data = resp.read()
             break
-        except Exception as err:  # noqa
+        except Exception as err:  # noqa: BLE001 - want to try next branch
             last_err = err
             data = None
     else:
@@ -95,6 +95,7 @@ def _fetch_repo_py_files(repo: str, per_repo_limit: int) -> Iterator[str]:
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
                 tf.extractall(tmp, filter="data")
         except TypeError:
+            # older Python without the `filter` kwarg
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
                 tf.extractall(tmp)
 
@@ -250,40 +251,48 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
         streaming=True,
     )
 
-    for sample in ds:
-        if len(accepted) >= max_collect:
-            break
+    try:
+        for sample in ds:
+            if len(accepted) >= max_collect:
+                break
 
-        scanned_pass1 += 1
-        if scanned_pass1 % _LOG_EVERY == 0:
-            logger.info(
-                "stream_stackoverflow pass 1: %d scanned, %d collected",
-                scanned_pass1,
-                len(accepted),
-            )
+            scanned_pass1 += 1
+            if scanned_pass1 % _LOG_EVERY == 0:
+                logger.info(
+                    "stream_stackoverflow pass 1: %d scanned, %d collected",
+                    scanned_pass1,
+                    len(accepted),
+                )
 
-        if sample.get("PostTypeId") != 1:
-            continue
-        if (sample.get("Score") or 0) < 5:
-            continue
+            if sample.get("PostTypeId") != 1:
+                continue
+            if (sample.get("Score") or 0) < 5:
+                continue
 
-        accepted_id = sample.get("AcceptedAnswerId")
-        if accepted_id is None:
-            continue
+            accepted_id = sample.get("AcceptedAnswerId")
+            if accepted_id is None:
+                continue
 
-        tags = sample.get("Tags") or []
-        if isinstance(tags, list):
-            has_python = any("python" in t.lower() for t in tags)
-        else:
-            has_python = "python" in str(tags).lower()
-        if not has_python:
-            continue
+            tags = sample.get("Tags") or []
+            if isinstance(tags, list):
+                has_python = any("python" in t.lower() for t in tags)
+            else:
+                has_python = "python" in str(tags).lower()
+            if not has_python:
+                continue
 
-        body = sample.get("Body") or ""
-        if not body:
-            continue
+            body = sample.get("Body") or ""
+            if not body:
+                continue
 
-        accepted[accepted_id] = body
+            accepted[accepted_id] = body
+    except Exception as err:  # noqa: BLE001 - network/stream faults, don't kill the pipeline
+        logger.warning(
+            "stream_stackoverflow pass 1 interrupted after %d scanned (%d collected so far): %s",
+            scanned_pass1,
+            len(accepted),
+            err,
+        )
 
     logger.info(
         "stream_stackoverflow pass 1 done: %d scanned, %d questions collected",
@@ -305,32 +314,40 @@ def stream_stackoverflow(max_docs: int = 200_000) -> Iterator[str]:
 
     count = 0
     scanned_pass2 = 0
-    for sample in ds2:
-        if count >= max_docs:
-            break
+    try:
+        for sample in ds2:
+            if count >= max_docs:
+                break
 
-        scanned_pass2 += 1
-        if scanned_pass2 % _LOG_EVERY == 0:
-            logger.info(
-                "stream_stackoverflow pass 2: %d scanned, %d yielded",
-                scanned_pass2,
-                count,
-            )
+            scanned_pass2 += 1
+            if scanned_pass2 % _LOG_EVERY == 0:
+                logger.info(
+                    "stream_stackoverflow pass 2: %d scanned, %d yielded",
+                    scanned_pass2,
+                    count,
+                )
 
-        if sample.get("PostTypeId") != 2:
-            continue
+            if sample.get("PostTypeId") != 2:
+                continue
 
-        answer_id = sample.get("Id")
-        if answer_id not in accepted:
-            continue
+            answer_id = sample.get("Id")
+            if answer_id not in accepted:
+                continue
 
-        answer_body = sample.get("Body") or ""
-        if not answer_body:
-            continue
+            answer_body = sample.get("Body") or ""
+            if not answer_body:
+                continue
 
-        doc = f"Question:\n{accepted[answer_id]}\n\nAnswer:\n{answer_body}"
-        yield doc
-        count += 1
+            doc = f"Question:\n{accepted[answer_id]}\n\nAnswer:\n{answer_body}"
+            yield doc
+            count += 1
+    except Exception as err:  # noqa: BLE001 - network/stream faults, don't kill the pipeline
+        logger.warning(
+            "stream_stackoverflow pass 2 interrupted after %d scanned (%d yielded so far): %s",
+            scanned_pass2,
+            count,
+            err,
+        )
 
     logger.info(
         "stream_stackoverflow done: %d yielded from %d pass-2 rows scanned",
