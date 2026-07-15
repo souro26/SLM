@@ -17,6 +17,15 @@ string-based checks run first so broken/garbage files are discarded before
 we pay the cost of parsing. Once we parse, we reuse the tree for the
 docstring check — we never parse the same file twice.
 
+v2 change: _parse() now catches RecursionError and MemoryError in addition
+to SyntaxError/ValueError. A small number of files in The Stack have
+pathologically deep nesting (huge nested literals, deeply chained
+expressions, generated code) that blow CPython's AST-construction
+recursion limit. That's a RecursionError, not a SyntaxError, and it was
+previously uncaught — one such file would crash the entire pipeline run
+after hours of otherwise-successful work. Now it's just treated as a
+file that fails the syntax filter, same as any other unparseable file.
+
 Usage:
     from data.filter import filter_stream
 
@@ -39,6 +48,12 @@ MIN_COMMENT_RATIO = 0.01
 MAX_COMMENT_RATIO = 0.80
 
 _LOG_EVERY = 10_000
+
+# Exceptions ast.parse() can raise on pathological (but not necessarily
+# "syntactically invalid" in the SyntaxError sense) input. Any of these
+# mean "this file can't be parsed" — treat it as a filtered-out file,
+# never let it propagate and kill the pipeline.
+_PARSE_FAILURE_EXCEPTIONS = (SyntaxError, ValueError, RecursionError, MemoryError)
 
 
 def is_long_enough(source: str) -> bool:
@@ -72,10 +87,16 @@ def has_acceptable_comment_ratio(source: str) -> bool:
 
 
 def _parse(source: str) -> ast.Module | None:
-    """Parse source into an AST."""
+    """Parse source into an AST.
+
+    Returns None for anything unparseable — genuine syntax errors,
+    pathologically deep nesting (RecursionError), or oversized/degenerate
+    input (MemoryError). None of these should ever propagate up and
+    kill the pipeline; a single bad file just gets filtered out.
+    """
     try:
         return ast.parse(source)
-    except (SyntaxError, ValueError):
+    except _PARSE_FAILURE_EXCEPTIONS:
         return None
 
 
