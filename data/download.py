@@ -10,28 +10,6 @@ Sources:
     - Python docs + stdlib source (cpython/typeshed)  10%
     - Curated open source (NumPy, PyTorch, etc.)       5%
 
-Key design decision (v3):
-    v1 had three separate full scans over The Stack (3x redundant downloads).
-    v2 collapsed this to a single pass, but the single pass still had to
-    scan deep into the dataset hunting for files from 7 specific repos
-    (5 curated + 2 stdlib) out of millions — the loop couldn't exit until
-    ALL THREE counters were full, so it was still bottlenecked by the
-    rarest category. Fixing "3 passes" to "1 pass" didn't fix "needle in
-    haystack."
-
-    v3 fix: stop searching for known repos inside The Stack at all.
-    stream_stack_all() now ONLY samples the general population and exits
-    as soon as stack_limit is hit — nothing else to wait for. Curated and
-    stdlib repos are fetched DIRECTLY from GitHub via tarball download
-    (fetch_curated_repos / fetch_stdlib_repos) since we already know
-    exactly which 7 repos we want. No scanning, no waiting on rare finds.
-
-Confirmed field names (verified against live datasets):
-    The Stack v1:   content, max_stars_repo_name, max_stars_count,
-                    max_line_length, avg_line_length
-    SO posts:       Id, PostTypeId, AcceptedAnswerId, ParentId,
-                    Score, Body, Tags
-
 Usage:
     from data.download import stream_stack_all, stream_stackoverflow
     from data.download import fetch_curated_repos, fetch_stdlib_repos
@@ -193,31 +171,39 @@ def stream_stack_all(stack_limit: int = 500_000) -> Iterator[str]:
     scanned = 0
     skipped = 0
 
-    for sample in ds:
-        if stack_count >= stack_limit:
-            break
+    try:
+        for sample in ds:
+            if stack_count >= stack_limit:
+                break
 
-        scanned += 1
+            scanned += 1
 
-        content = sample.get("content") or ""
-        if not content:
-            skipped += 1
-            continue
+            content = sample.get("content") or ""
+            if not content:
+                skipped += 1
+                continue
 
-        repo = sample.get("max_stars_repo_name") or ""
-        if repo in skip_repos:
-            continue
+            repo = sample.get("max_stars_repo_name") or ""
+            if repo in skip_repos:
+                continue
 
-        stack_count += 1
-        yield content
+            stack_count += 1
+            yield content
 
-        if scanned % _LOG_EVERY == 0:
-            logger.info(
-                "stream_stack_all: %d scanned — stack=%d, skipped=%d",
-                scanned,
-                stack_count,
-                skipped,
-            )
+            if scanned % _LOG_EVERY == 0:
+                logger.info(
+                    "stream_stack_all: %d scanned — stack=%d, skipped=%d",
+                    scanned,
+                    stack_count,
+                    skipped,
+                )
+    except Exception as err:  # noqa: BLE001 - network/stream faults, don't kill the pipeline
+        logger.warning(
+            "stream_stack_all interrupted after %d scanned (%d collected so far): %s",
+            scanned,
+            stack_count,
+            err,
+        )
 
     logger.info(
         "stream_stack_all done: %d scanned — stack=%d, skipped=%d",
