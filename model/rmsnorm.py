@@ -34,13 +34,11 @@ class RMSNorm(nn.Module):
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Rescale x by its root-mean-square along the last dimension."""
-        input_dtype = x.dtype
         x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return x.to(input_dtype)
+        variance = (x * x).mean(dim=-1, keepdim=True)
+        return x * torch.rsqrt(variance + self.eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
-        out = self._normalize(x) * self.weight
+        out = self._normalize(x) * self.weight.float()
         return out.to(input_dtype)

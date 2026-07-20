@@ -60,8 +60,8 @@ class RotaryEmbedding(nn.Module):
                 f"requested positions up to {end_pos} exceed max_seq_len "
                 f"({self.max_seq_len}) the RoPE cache was built for"
             )
-        cos = self.cos_cached[start_pos:end_pos].to(device)
-        sin = self.sin_cached[start_pos:end_pos].to(device)
+        cos = self.cos_cached[start_pos:end_pos]
+        sin = self.sin_cached[start_pos:end_pos]
         return cos, sin
 
 
