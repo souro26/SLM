@@ -80,8 +80,8 @@ def apply_rotary_pos_emb(
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply RoPE rotation to query and key tensors."""
-    cos = cos.unsqueeze(0).unsqueeze(0)
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    cos = cos.unsqueeze(0).unsqueeze(0).to(q.dtype)
+    sin = sin.unsqueeze(0).unsqueeze(0).to(q.dtype)
     q_rotated = (q * cos) + (_rotate_half(q) * sin)
     k_rotated = (k * cos) + (_rotate_half(k) * sin)
     return q_rotated, k_rotated

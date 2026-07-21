@@ -67,7 +67,7 @@ class KVCache:
     v: torch.Tensor
 
     @property
-    def seq_length(self) -> int:
+    def seq_len(self) -> int:
         return self.k.shape[2]
 
 
