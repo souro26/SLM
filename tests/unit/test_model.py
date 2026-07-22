@@ -39,13 +39,13 @@ TINY_CFG_DICT = {
     "d_model": 64,
     "n_heads_q": 4,
     "n_heads_kv": 2,
-    "head_dim": 16,  # 4 * 16 == 64 ✓
+    "head_dim": 16,
     "d_ffn": 128,
     "vocab_size": 256,
     "context_length": 32,
     "dropout": 0.0,
     "dtype": torch.bfloat16,
-    "tokenizer_path": "tokenizer/trained",  # doesn't need to exist for model tests
+    "tokenizer_path": "tokenizer/trained",
     "pad_token": "<|pad|>",
     "eof_token": "<|endoffile|>",
 }
