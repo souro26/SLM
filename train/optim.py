@@ -24,7 +24,6 @@ from train.config import TrainConfig
 logger = logging.getLogger(__name__)
 
 
-@torch.compile
 def zeropower_via_newtonschulz5(g: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
     """Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. Runs in bfloat16 to maximize throughput on modern GPUs."""
     assert len(g.shape) == 2
