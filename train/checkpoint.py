@@ -122,6 +122,26 @@ class CheckpointManager:
 
         return metadata
 
+    def get_latest_checkpoint(self) -> Path | None:
+        """Return the path to the highest-step checkpoint, or None if none exist."""
+        if not self.checkpoint_dir.exists():
+            return None
+
+        checkpoints = []
+        for p in self.checkpoint_dir.iterdir():
+            if p.is_dir() and "step_" in p.name:
+                try:
+                    step_num = int(p.name.split("step_")[1])
+                    checkpoints.append((step_num, p))
+                except ValueError:
+                    pass
+
+        if not checkpoints:
+            return None
+
+        checkpoints.sort(key=lambda x: x[0])
+        return checkpoints[-1][1]
+
     def _cleanup(self) -> None:
         """Keep only the `keep_last_n` most recent step_XXXXXX directories."""
         checkpoints = []
