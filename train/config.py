@@ -199,7 +199,11 @@ class TrainConfig:
             raise ValueError(f"log_every_steps must be > 0, got {self.log_every_steps}")
         if self.keep_last_n < 1:
             raise ValueError(f"keep_last_n must be >= 1, got {self.keep_last_n}")
-        if self.resume_from is not None and not Path(self.resume_from).exists():
+        if (
+            self.resume_from is not None
+            and self.resume_from.lower() != "latest"
+            and not Path(self.resume_from).exists()
+        ):
             raise ValueError(
                 f"resume_from='{self.resume_from}' does not exist — "
                 "refusing to silently start a fresh run instead of resuming"
