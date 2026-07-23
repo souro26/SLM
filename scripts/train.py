@@ -32,14 +32,19 @@ def main() -> None:
     parser.add_argument(
         "--config", type=str, required=True, help="Path to the training YAML config file"
     )
+    parser.add_argument(
+        "--model_config",
+        type=str,
+        default="configs/model.yaml",
+        help="Path to the model YAML config file",
+    )
     args = parser.parse_args()
 
     logger.info("Loading training config from %s", args.config)
     train_cfg = TrainConfig.from_yaml(args.config)
 
-    # For now, we assume the model uses a standard config
-    # In a full run, you might want to specify the model config path inside train_cfg
-    model_cfg = ModelConfig()
+    logger.info("Loading model config from %s", args.model_config)
+    model_cfg = ModelConfig.from_yaml(args.model_config)
 
     logger.info("Initializing model...")
     model = TransformerModel(model_cfg)
