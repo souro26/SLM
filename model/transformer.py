@@ -51,7 +51,7 @@ from model.rope import RotaryEmbedding
 logger = logging.getLogger(__name__)
 
 _INIT_STD = 0.02
-_TARGET_PARAM_COUNT = 70_000_000
+_TARGET_PARAM_COUNT = 85_600_000
 _PARAM_COUNT_WARN_TOLERANCE = 0.05
 
 
