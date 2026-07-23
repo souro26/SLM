@@ -186,9 +186,9 @@ class TrainConfig:
             raise ValueError(
                 f"lr_schedule.warmup_steps must be >= 0, got {self.lr_schedule.warmup_steps}"
             )
-        if not (0.0 < self.lr_schedule.min_lr_ratio <= 1.0):
+        if not (0.0 <= self.lr_schedule.min_lr_ratio <= 1.0):
             raise ValueError(
-                f"lr_schedule.min_lr_ratio must be in (0, 1], got {self.lr_schedule.min_lr_ratio}"
+                f"lr_schedule.min_lr_ratio must be in [0, 1], got {self.lr_schedule.min_lr_ratio}"
             )
 
         if self.save_every_steps <= 0:
