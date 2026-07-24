@@ -11,8 +11,8 @@ tokenizer_path: tokenizer/artifacts/tokenizer.json
 max_tokens: 2_000_000_000
 
 # Batch
-micro_batch_size: 4
-grad_accum_steps: 16
+micro_batch_size: 2
+grad_accum_steps: 8
 
 # Optimizer
 optimizer:

@@ -4,6 +4,7 @@ train/checkpoint.py
 Handles saving and resuming training state. A full training state consists of:
   - Model weights
   - Optimizer states (Muon and AdamW)
+  - RNG state (CPU and CUDA)
   - Training progress (optimizer step)
   - Data stream position (so training resumes exactly where it left off)
 
@@ -22,6 +23,8 @@ Usage:
         adamw_opt=adamw_optimizer,
         stream_pos=train_stream.position,
         stream_epoch=train_stream.epoch,
+        lr_muon=current_muon_lr,
+        lr_adamw=current_adamw_lr,
     )
 
     # Load
@@ -43,6 +46,16 @@ from torch import nn, optim
 logger = logging.getLogger(__name__)
 
 
+def _parse_step(path: Path) -> int | None:
+    """Helper to safely extract the step number from a checkpoint directory name."""
+    if not path.is_dir() or "step_" not in path.name:
+        return None
+    try:
+        return int(path.name.split("step_")[1])
+    except ValueError:
+        return None
+
+
 class CheckpointManager:
     """Manages saving and garbage-collecting training checkpoints."""
 
@@ -59,32 +72,51 @@ class CheckpointManager:
         adamw_opt: optim.Optimizer,
         stream_pos: int,
         stream_epoch: int,
+        lr_muon: float = 0.0,
+        lr_adamw: float = 0.0,
     ) -> Path:
-        """Save a checkpoint and clean up old ones."""
-        step_dir = self.checkpoint_dir / f"step_{step:06d}"
-        step_dir.mkdir(parents=True, exist_ok=True)
+        """Save a checkpoint atomically and clean up old ones."""
+        final_dir = self.checkpoint_dir / f"step_{step:06d}"
+        tmp_dir = self.checkpoint_dir / f"step_{step:06d}.tmp"
 
-        logger.info("Saving checkpoint to %s", step_dir)
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving checkpoint to %s", final_dir)
+
+        # Get RNG states for reproducibility
+        rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
 
         torch.save(
             {
                 "model": model.state_dict(),
                 "muon": muon_opt.state_dict(),
                 "adamw": adamw_opt.state_dict(),
+                "rng_state": rng_state,
+                "cuda_rng_state": cuda_rng_state,
             },
-            step_dir / "tensors.pt",
+            tmp_dir / "tensors.pt",
         )
 
         metadata = {
             "step": step,
             "stream_pos": stream_pos,
             "stream_epoch": stream_epoch,
+            "lr_muon": lr_muon,
+            "lr_adamw": lr_adamw,
         }
-        with open(step_dir / "metadata.json", "w", encoding="utf-8") as f:
+        with open(tmp_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 
+        # Atomic rename ensures a partially written checkpoint is never picked up
+        if final_dir.exists():
+            shutil.rmtree(final_dir)
+        tmp_dir.rename(final_dir)
+
         self._cleanup()
-        return step_dir
+        return final_dir
 
     def load(
         self,
@@ -107,10 +139,24 @@ class CheckpointManager:
             else:
                 raise FileNotFoundError(f"Missing tensors.pt in {resume_path}")
 
+        # weights_only=False is intentional here: optimizer state dicts contain Python objects (e.g. step counts)
+        # that weights_only=True would reject.
         state_dict = torch.load(tensor_path, map_location="cpu", weights_only=False)
         model.load_state_dict(state_dict["model"])
         muon_opt.load_state_dict(state_dict["muon"])
         adamw_opt.load_state_dict(state_dict["adamw"])
+
+        if "rng_state" in state_dict:
+            torch.set_rng_state(state_dict["rng_state"])
+        if (
+            "cuda_rng_state" in state_dict
+            and torch.cuda.is_available()
+            and state_dict["cuda_rng_state"]
+        ):
+            try:
+                torch.cuda.set_rng_state_all(state_dict["cuda_rng_state"])
+            except Exception as e:
+                logger.warning("Could not restore CUDA RNG state: %s", e)
 
         meta_path = resume_path / "metadata.json"
         metadata = {}
@@ -129,12 +175,9 @@ class CheckpointManager:
 
         checkpoints = []
         for p in self.checkpoint_dir.iterdir():
-            if p.is_dir() and "step_" in p.name:
-                try:
-                    step_num = int(p.name.split("step_")[1])
-                    checkpoints.append((step_num, p))
-                except ValueError:
-                    pass
+            step_num = _parse_step(p)
+            if step_num is not None and not p.name.endswith(".tmp"):
+                checkpoints.append((step_num, p))
 
         if not checkpoints:
             return None
@@ -146,12 +189,9 @@ class CheckpointManager:
         """Keep only the `keep_last_n` most recent step_XXXXXX directories."""
         checkpoints = []
         for p in self.checkpoint_dir.iterdir():
-            if p.is_dir() and p.name.startswith("step_"):
-                try:
-                    step_num = int(p.name.split("_")[1])
-                    checkpoints.append((step_num, p))
-                except ValueError:
-                    pass
+            step_num = _parse_step(p)
+            if step_num is not None and not p.name.endswith(".tmp"):
+                checkpoints.append((step_num, p))
 
         checkpoints.sort(key=lambda x: x[0])
 
