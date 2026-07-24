@@ -138,8 +138,28 @@ class TransformerModel(nn.Module):
         x = self.token_emb(input_ids)
 
         new_caches: list[KVCache] = []
+
+        def _create_custom_forward(module):
+            def custom_forward(*inputs):
+                return module(*inputs)
+
+            return custom_forward
+
         for block, cache in zip(self.blocks, kv_caches, strict=False):
-            x, new_cache = block(x, cos, sin, kv_cache=cache)
+            if getattr(self, "gradient_checkpointing", False) and self.training:
+                import torch.utils.checkpoint
+
+                x, new_cache = torch.utils.checkpoint.checkpoint(
+                    _create_custom_forward(block),
+                    x,
+                    cos,
+                    sin,
+                    cache,
+                    use_reentrant=False,
+                )
+            else:
+                x, new_cache = block(x, cos, sin, kv_cache=cache)
+
             new_caches.append(new_cache)
 
         x = self.final_norm(x)

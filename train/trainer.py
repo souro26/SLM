@@ -38,6 +38,9 @@ class Trainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
+        # Apply gradient checkpointing if requested
+        self.model.gradient_checkpointing = getattr(self.cfg, "gradient_checkpointing", False)
+
         if torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
             torch.set_float32_matmul_precision("high")
@@ -52,6 +55,14 @@ class Trainer:
             batch_size=self.cfg.micro_batch_size,
             context_length=self.model.cfg.context_length,
         )
+
+        self.val_stream = None
+        if self.cfg.val_data:
+            self.val_stream = PackedTokenStream(
+                self.cfg.val_data,
+                batch_size=self.cfg.micro_batch_size,
+                context_length=self.model.cfg.context_length,
+            )
 
         self.total_steps = self.cfg.max_tokens // (
             self.cfg.micro_batch_size * self.cfg.grad_accum_steps * self.model.cfg.context_length
@@ -95,6 +106,32 @@ class Trainer:
             logger.error("Failed to resume from %s: %s", self.cfg.resume_from, e)
             raise
 
+    @torch.no_grad()
+    def _evaluate(self, step: int, num_iters: int = 20) -> None:
+        if self.val_stream is None:
+            return
+
+        logger.info("Running evaluation at step %d...", step)
+        self.model.eval()
+
+        total_loss = 0.0
+        for _ in range(num_iters):
+            input_ids, target_ids = self.val_stream.next_batch()
+            input_ids = input_ids.to(self.device, non_blocking=True)
+            target_ids = target_ids.to(self.device, non_blocking=True)
+
+            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                logits, _ = self.model(input_ids)
+                loss = torch.nn.functional.cross_entropy(
+                    logits.view(-1, logits.size(-1)), target_ids.view(-1)
+                )
+                total_loss += loss.item()
+
+        avg_loss = total_loss / num_iters
+        self.train_logger.log_metrics(step, {"val_loss": avg_loss}, tag="eval")
+
+        self.model.train()
+
     def run(self) -> None:
         logger.info("Starting training loop. Target steps: %d", self.total_steps)
         logger.info(
@@ -114,6 +151,9 @@ class Trainer:
 
         try:
             while step < self.total_steps:
+                if step % self.cfg.eval_every_steps == 0:
+                    self._evaluate(step)
+
                 step_start_time = time.time()
 
                 current_muon_lr = self.scheduler.get_lr(step, self.cfg.optimizer.muon.lr)
@@ -149,10 +189,8 @@ class Trainer:
                     self._save_checkpoint(step, prefix="emergency_NaN")
                     sys.exit(1)
 
-                if self.cfg.grad_clip > 0.0:
-                    grad_norm = clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-                else:
-                    grad_norm = self._calculate_grad_norm()
+                # TrainConfig guarantees grad_clip > 0, so this always runs
+                grad_norm = clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
 
                 self.muon_opt.step()
                 self.adamw_opt.step()
@@ -208,6 +246,9 @@ class Trainer:
 
     def _save_checkpoint(self, step: int, prefix: str | None = None) -> None:
         """Helper to save state with the manager, allowing custom prefixes for emergency saves."""
+        current_muon_lr = self.scheduler.get_lr(step, self.cfg.optimizer.muon.lr)
+        current_adamw_lr = self.scheduler.get_lr(step, self.cfg.optimizer.adamw.lr)
+
         saved_path = self.checkpoint_manager.save(
             step=step,
             model=self.model,
@@ -215,21 +256,18 @@ class Trainer:
             adamw_opt=self.adamw_opt,
             stream_pos=self.train_stream.position,
             stream_epoch=self.train_stream.epoch,
+            lr_muon=current_muon_lr,
+            lr_adamw=current_adamw_lr,
         )
 
         if prefix:
-            new_path = saved_path.parent / f"{prefix}_{saved_path.name}"
+            # We explicitly avoid the word "step_" so CheckpointManager._cleanup() ignores this directory
+            # e.g. crash_000500 instead of crash_step_000500
+            safe_name = f"{prefix}_{step:06d}"
+            new_path = saved_path.parent / safe_name
             if new_path.exists():
                 import shutil
 
                 shutil.rmtree(new_path)
             saved_path.rename(new_path)
             logger.info("Saved special checkpoint to %s", new_path)
-
-    def _calculate_grad_norm(self) -> float:
-        total_norm = 0.0
-        for p in self.model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.detach().data.norm(2)
-                total_norm += param_norm.item() ** 2
-        return total_norm**0.5
