@@ -4,7 +4,7 @@ train/optim.py
 Configures and instantiates the optimizers for the training loop.
 Implements the Muon optimizer (Momentum Orthogonalized) for 2D parameters (nn.Linear)
 using Newton-Schulz iteration in bfloat16, and PyTorch's AdamW for all 1D parameters
-(RMSNorm, biases) and Embeddings.
+(RMSNorm, biases) and the tied embedding matrix.
 
 Usage:
     from train.optim import create_optimizers
@@ -46,7 +46,7 @@ def zeropower_via_newtonschulz5(g: torch.Tensor, steps: int = 5, eps: float = 1e
 
 
 class Muon(optim.Optimizer):
-    """Muon optimizer. Optimizes 2D parameters by orthogonalizing their gradients via Newton-Schulz iteration."""
+    """Muon optimizer."""
 
     def __init__(
         self,
@@ -90,18 +90,22 @@ class Muon(optim.Optimizer):
                     state["momentum_buffer"] = torch.zeros_like(g)
 
                 buf = state["momentum_buffer"]
-                g_ortho = zeropower_via_newtonschulz5(g, steps=ns_steps)
-                buf.mul_(momentum).add_(g_ortho)
+                # Momentum on the RAW gradient — buf.lerp_(g, 1 - momentum)
+                # is momentum*buf + (1 - momentum)*g.
+                buf.lerp_(g, 1.0 - momentum)
 
-                update = g_ortho.add(buf, alpha=momentum) if nesterov else buf.clone()
+                # Nesterov look-ahead blend, still on the raw (non-orthogonalized) tensor.
+                g = g.lerp(buf, momentum) if nesterov else buf
+
+                # Orthogonalize ONCE, after momentum — not before. See class docstring.
+                g_ortho = zeropower_via_newtonschulz5(g, steps=ns_steps)
 
                 scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
-                update.mul_(scale)
 
                 if weight_decay > 0.0:
                     p.mul_(1.0 - lr * weight_decay)
 
-                p.add_(update, alpha=-lr)
+                p.add_(g_ortho, alpha=-lr * scale)
 
         return loss
 
