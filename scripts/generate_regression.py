@@ -12,7 +12,7 @@ Usage:
 import json
 from pathlib import Path
 
-from tokenizer.tokenizer import SLMTokenizer
+from tokenizer import SLMTokenizer
 
 TOKENIZER_DIR = Path("tokenizer/trained")
 OUTPUT_FILE = Path("tests/unit/tokenizer_regression.json")

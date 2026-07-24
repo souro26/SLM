@@ -12,10 +12,8 @@ import argparse
 import logging
 import sys
 
-from model.config import ModelConfig
-from model.transformer import TransformerModel
-from train.config import TrainConfig
-from train.trainer import Trainer
+from model import ModelConfig, TransformerModel
+from train import TrainConfig, Trainer
 
 # Setup basic console logging for the startup phase
 logging.basicConfig(
