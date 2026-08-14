@@ -34,15 +34,36 @@ import sys
 import time
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
+LOGS_DIR = Path("logs")
+RESULTS_DIR = Path("logs/eval_results")
 CHECKPOINT_DIR = Path("checkpoints/pilot-001/step_061000")
 MODEL_CONFIG = Path("configs/model.yaml")
 TOKENIZER_DIR = Path("tokenizer/trained")
-RESULTS_DIR = Path("results")
 SAMPLES_FILE = RESULTS_DIR / "mbpp_samples.jsonl"
 RESULTS_FILE = RESULTS_DIR / "mbpp_results.json"
+
+
+def setup_logging() -> None:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    log_file = LOGS_DIR / "eval_mbpp.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    stream_handler = logging.StreamHandler(sys.stdout)
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+
+logger = logging.getLogger(__name__)
 
 # Stop at the next top-level definition
 STOP_STRINGS = ["\ndef ", "\nclass ", "\nif __name__", "\n# ---"]
@@ -311,6 +332,7 @@ def run_evaluation(
 
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="MBPP benchmark for SLM")
     parser.add_argument("--n-samples", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)

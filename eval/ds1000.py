@@ -34,15 +34,36 @@ import sys
 import time
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
+LOGS_DIR = Path("logs")
+RESULTS_DIR = Path("logs/eval_results")
 CHECKPOINT_DIR = Path("checkpoints/pilot-001/step_061000")
 MODEL_CONFIG = Path("configs/model.yaml")
 TOKENIZER_DIR = Path("tokenizer/trained")
-RESULTS_DIR = Path("results")
 SAMPLES_FILE = RESULTS_DIR / "ds1000_samples.jsonl"
 RESULTS_FILE = RESULTS_DIR / "ds1000_results.json"
+
+
+def setup_logging() -> None:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    log_file = LOGS_DIR / "eval_ds1000.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    stream_handler = logging.StreamHandler(sys.stdout)
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+
+logger = logging.getLogger(__name__)
 
 # Stop at double newline or next function/top-level block
 STOP_STRINGS = ["\n# ---", "\ndef ", "\nclass ", "\nif __name__"]
@@ -254,6 +275,7 @@ def evaluate_samples(
 
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="DS-1000 benchmark for SLM")
     parser.add_argument("--n-samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
