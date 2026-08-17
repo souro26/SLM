@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 # Stop at the next top-level definition
 STOP_STRINGS = ["\ndef ", "\nclass ", "\nif __name__", "\n# ---"]
-TEMPERATURE = 0.8
+TEMPERATURE = 0.2
 TOP_P = 0.95
 
 # Execution timeout per test (seconds)
@@ -260,7 +260,7 @@ def generate_samples(
                 {
                     "task_id": problem["task_id"],
                     "prompt": prompt,
-                    "completion": completion,
+                    "completion": completion.lstrip(" "),
                 }
             )
 
@@ -337,7 +337,7 @@ def main() -> None:
     parser.add_argument("--n-samples", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--checkpoint", type=str, default=str(CHECKPOINT_DIR))
     parser.add_argument(
         "--timeout", type=float, default=EXEC_TIMEOUT, help="Per-test execution timeout in seconds"

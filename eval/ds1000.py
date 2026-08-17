@@ -78,30 +78,38 @@ EXEC_TIMEOUT = 10.0
 
 
 def load_ds1000_problems(library_filter: str | None = None) -> list[dict]:
-    """Load DS-1000 dataset from HuggingFace."""
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        logger.error("datasets not installed. Run: pip install datasets")
-        sys.exit(1)
+    """Load DS-1000 dataset from HuggingFace cache or direct download."""
+    logger.info("Loading DS-1000 dataset...")
+    cache_path = LOGS_DIR / "ds1000_test.jsonl"
+    if not cache_path.exists():
+        url = "https://huggingface.co/datasets/xlangai/DS-1000/resolve/main/test.jsonl"
+        logger.info("Downloading DS-1000 dataset from HuggingFace (%s)...", url)
+        import urllib.request
 
-    logger.info("Loading DS-1000 dataset from HuggingFace (xlangai/DS-1000)...")
-    ds = load_dataset("xlangai/DS-1000", split="test", trust_remote_code=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as resp, open(cache_path, "wb") as out_file:
+            out_file.write(resp.read())
+        logger.info("Downloaded DS-1000 dataset to %s", cache_path)
+
     problems = []
-
-    for row in ds:
-        lib = row.get("lib", row.get("library", "Unknown"))
-        if library_filter and lib.lower() != library_filter.lower():
-            continue
-        problems.append(
-            {
-                "id": row.get("id", row.get("metadata", {}).get("problem_id")),
-                "prompt": row["prompt"],
-                "reference_code": row.get("reference_code", ""),
-                "test_code": row.get("code_context", row.get("test", "")),
-                "lib": lib,
-            }
-        )
+    with open(cache_path, encoding="utf-8") as f:
+        for line in f:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            row = json.loads(line_str)
+            lib = row.get("lib", row.get("library", "Unknown"))
+            if library_filter and lib.lower() != library_filter.lower():
+                continue
+            problems.append(
+                {
+                    "id": row.get("id", row.get("metadata", {}).get("problem_id")),
+                    "prompt": row["prompt"],
+                    "reference_code": row.get("reference_code", ""),
+                    "test_code": row.get("code_context", row.get("test", "")),
+                    "lib": lib,
+                }
+            )
 
     logger.info("Loaded %d DS-1000 problems", len(problems))
     return problems
@@ -167,7 +175,7 @@ def generate_samples(
                     "lib": problem["lib"],
                     "raw_prompt": raw_prompt,
                     "model_prompt": model_prompt,
-                    "completion": completion,
+                    "completion": completion.lstrip(" "),
                 }
             )
 
@@ -280,7 +288,7 @@ def main() -> None:
     parser.add_argument("--n-samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--checkpoint", type=str, default=str(CHECKPOINT_DIR))
     parser.add_argument(
         "--lib", type=str, default=None, help="Filter by library (Pandas, Numpy, etc)"

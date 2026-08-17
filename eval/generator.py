@@ -99,7 +99,12 @@ class CodeGenerator:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_dir}")
 
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+                logger.info("Using GPU: %s", torch.cuda.get_device_name(0))
+            else:
+                self.device = torch.device("cpu")
+                logger.warning("CUDA not available! Falling back to CPU.")
         else:
             self.device = torch.device(device)
 
@@ -190,16 +195,19 @@ class CodeGenerator:
                 if next_token == self._eof_id:
                     break
 
-                partial = self.tokenizer.decode(completion_ids)
-                triggered = False
-                for stop in stop_strings:
-                    idx = partial.find(stop)
-                    if idx != -1:
-                        completion_ids = self.tokenizer.encode(partial[:idx], add_eof=False)
-                        triggered = True
+                # Only run string decode check when newlines or stop markers are generated
+                # or every 4 tokens, avoiding expensive token decoding overhead.
+                if len(completion_ids) % 4 == 0 or next_token == self._eof_id:
+                    partial = self.tokenizer.decode(completion_ids)
+                    triggered = False
+                    for stop in stop_strings:
+                        idx = partial.find(stop)
+                        if idx != -1:
+                            completion_ids = self.tokenizer.encode(partial[:idx], add_eof=False)
+                            triggered = True
+                            break
+                    if triggered:
                         break
-                if triggered:
-                    break
 
                 next_tensor = torch.tensor([[next_token]], dtype=torch.long, device=self.device)
                 logits, kv_caches = self.model(next_tensor, kv_caches=kv_caches)

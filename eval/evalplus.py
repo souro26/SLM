@@ -68,10 +68,24 @@ def setup_logging() -> None:
 logger = logging.getLogger(__name__)
 
 STOP_STRINGS = ["\ndef ", "\nclass ", "\nif __name__", "\n# ---"]
-TEMPERATURE = 0.8
+TEMPERATURE = 0.2
 TOP_P = 0.95
 
 DATASET_CHOICES = ["humaneval", "mbpp"]
+
+
+def _ensure_indented_prompt(prompt: str) -> str:
+    """Ensure prompt ends with 4-space indentation for base model completion."""
+    prompt_stripped = prompt.rstrip()
+    if (
+        prompt_stripped.endswith(":")
+        or prompt_stripped.endswith('"""')
+        or prompt_stripped.endswith("'''")
+    ):
+        return prompt_stripped + "\n    "
+    if not prompt.endswith("    "):
+        return prompt_stripped + "\n    "
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +142,7 @@ def generate_samples(
     total = len(problems)
 
     for i, (task_id, problem) in enumerate(problems.items()):
-        prompt = problem["prompt"]
+        prompt = _ensure_indented_prompt(problem["prompt"])
         logger.info("[%d/%d] %s — %d sample(s)...", i + 1, total, task_id, n_samples)
         t0 = time.time()
 
@@ -143,7 +157,7 @@ def generate_samples(
         logger.info("  done in %.1fs", time.time() - t0)
 
         for completion in completions:
-            samples.append({"task_id": task_id, "completion": completion})
+            samples.append({"task_id": task_id, "completion": completion.lstrip(" ")})
 
     return samples
 
@@ -168,6 +182,14 @@ def run_evalplus_evaluation(dataset: str, samples_path: Path) -> None:
     This runs the rigorous test suite (80x more tests than the original
     HumanEval/MBPP) and prints pass@k directly.
     """
+    import os
+
+    env = os.environ.copy()
+    # Add eval/compat directory to PYTHONPATH so dummy 'resource' module is found on Windows
+    # without shadowing the installed 'evalplus' package.
+    compat_dir = str(Path(__file__).resolve().parent / "compat")
+    env["PYTHONPATH"] = f"{compat_dir}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
     cmd = [
         sys.executable,
         "-m",
@@ -178,7 +200,7 @@ def run_evalplus_evaluation(dataset: str, samples_path: Path) -> None:
         str(samples_path),
     ]
     logger.info("Running EvalPlus evaluation: %s", " ".join(cmd))
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     if result.returncode != 0:
         logger.error("EvalPlus evaluation exited with code %d", result.returncode)
 

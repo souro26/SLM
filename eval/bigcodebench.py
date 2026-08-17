@@ -148,7 +148,7 @@ def generate_samples(
         logger.info("  done in %.1fs", time.time() - t0)
 
         for completion in completions:
-            samples.append({"task_id": task_id, "solution": completion})
+            samples.append({"task_id": task_id, "solution": completion.lstrip(" ")})
 
     return samples
 
@@ -168,15 +168,25 @@ def save_samples(samples: list[dict], path: Path) -> None:
 
 def run_bigcodebench_eval(samples_path: Path) -> None:
     """Run official bigcodebench evaluation CLI."""
+    import os
+
+    env = os.environ.copy()
+    compat_dir = str(Path(__file__).resolve().parent / "compat")
+    env["PYTHONPATH"] = f"{compat_dir}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
     cmd = [
         sys.executable,
         "-m",
         "bigcodebench.evaluate",
+        "--split",
+        "complete",
+        "--subset",
+        "full",
         "--samples",
         str(samples_path),
     ]
     logger.info("Running BigCodeBench evaluation: %s", " ".join(cmd))
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     if result.returncode != 0:
         logger.warning("BigCodeBench evaluation command exited with code %d", result.returncode)
 

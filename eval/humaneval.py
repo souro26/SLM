@@ -4,27 +4,27 @@ eval/humaneval.py
 HumanEval and HumanEval+ benchmark evaluation for the SLM.
 
 Generates N completions for each of the 164 HumanEval problems, saves them
-to results/humaneval_samples.jsonl, then runs the official pass@k evaluation.
+to logs/eval_results/humaneval_samples.jsonl, then runs functional correctness.
 
-Requirements (run once before using this script):
-    pip install human-eval datasets
+Uses native subprocess execution for 100% Windows compatibility (avoiding
+Unix-only signal.setitimer crashes in OpenAI's original runner).
+
+Requirements:
+    pip install datasets
 
 Usage:
-    # Quick run — 20 samples/problem, reports pass@1 and pass@10
-    python -m eval.humaneval
+    # 1 sample per problem (greedy pass@1)
+    python -m eval.humaneval --n-samples 1 --temperature 0.0
 
-    # More samples for better pass@100 estimate (takes longer)
-    python -m eval.humaneval --n-samples 100
+    # 10 samples per problem for pass@1 and pass@10
+    python -m eval.humaneval --n-samples 10 --temperature 0.2
 
-    # Use a specific checkpoint
-    python -m eval.humaneval --checkpoint checkpoints/pilot-001/step_061000
-
-    # Skip generation if you already have samples, just re-evaluate
+    # Score existing samples file without re-generating
     python -m eval.humaneval --eval-only
 
 Output:
-    results/humaneval_samples.jsonl  — raw completions
-    results/humaneval_results.json   — pass@k scores
+    logs/eval_results/humaneval_samples.jsonl  — raw completions
+    logs/eval_results/humaneval_results.json   — pass@k scores
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -68,8 +70,23 @@ def setup_logging() -> None:
 logger = logging.getLogger(__name__)
 
 STOP_STRINGS = ["\ndef ", "\nclass ", "\nif __name__", "\n# ---"]
-TEMPERATURE = 0.8
+TEMPERATURE = 0.2
 TOP_P = 0.95
+EXEC_TIMEOUT = 5.0
+
+
+def _ensure_indented_prompt(prompt: str) -> str:
+    """Ensure prompt ends with 4-space indentation for base model completion."""
+    prompt_stripped = prompt.rstrip()
+    if (
+        prompt_stripped.endswith(":")
+        or prompt_stripped.endswith('"""')
+        or prompt_stripped.endswith("'''")
+    ):
+        return prompt_stripped + "\n    "
+    if not prompt.endswith("    "):
+        return prompt_stripped + "\n    "
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +95,12 @@ TOP_P = 0.95
 
 
 def load_humaneval_problems() -> list[dict]:
-    """Load the 164 HumanEval problems from the official package or HuggingFace."""
+    """Load the 164 HumanEval problems."""
     try:
         from human_eval.data import read_problems
 
-        problems = list(read_problems().values())
+        probs = read_problems()
+        problems = [probs[k] for k in sorted(probs.keys(), key=lambda x: int(x.split("/")[1]))]
         logger.info("Loaded %d problems from human-eval package", len(problems))
         return problems
     except ImportError:
@@ -107,12 +125,7 @@ def load_humaneval_problems() -> list[dict]:
     except ImportError:
         pass
 
-    logger.error(
-        "Could not load HumanEval. Install with:\n"
-        "  pip install human-eval datasets\n"
-        "or:\n"
-        "  pip install git+https://github.com/openai/human-eval.git"
-    )
+    logger.error("Could not load HumanEval dataset. Install datasets or human-eval.")
     sys.exit(1)
 
 
@@ -129,7 +142,6 @@ def generate_samples(
     top_p: float,
     max_new_tokens: int,
 ) -> list[dict]:
-    """Generate n_samples completions for each problem."""
     from eval.generator import CodeGenerator
 
     logger.info("Loading model from %s...", checkpoint_dir)
@@ -144,7 +156,8 @@ def generate_samples(
 
     for i, problem in enumerate(problems):
         task_id = problem["task_id"]
-        prompt = problem["prompt"]
+        raw_prompt = problem["prompt"]
+        prompt = _ensure_indented_prompt(raw_prompt)
 
         logger.info(
             "[%d/%d] %s — generating %d sample(s)...",
@@ -164,11 +177,17 @@ def generate_samples(
             num_samples=n_samples,
         )
 
-        elapsed = time.time() - t0
-        logger.info("  done in %.1fs", elapsed)
+        logger.info("  done in %.1fs", time.time() - t0)
 
         for completion in completions:
-            samples.append({"task_id": task_id, "completion": completion})
+            samples.append(
+                {
+                    "task_id": task_id,
+                    "raw_prompt": raw_prompt,
+                    "prompt": prompt,
+                    "completion": completion.lstrip(" "),
+                }
+            )
 
     return samples
 
@@ -182,30 +201,84 @@ def save_samples(samples: list[dict], path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Evaluation
+# Execution & Evaluation (Windows-safe Subprocess Execution)
 # ---------------------------------------------------------------------------
 
 
-def run_evaluation(samples_path: Path, k_values: list[int]) -> dict:
-    """Run the official HumanEval functional correctness evaluation."""
+def _run_code_in_subprocess(code: str, timeout: float) -> tuple[bool, str]:
     try:
-        from human_eval.evaluation import evaluate_functional_correctness
-    except ImportError:
-        logger.error(
-            "human-eval package not found. Install with:\n"
-            "  pip install git+https://github.com/openai/human-eval.git"
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-        sys.exit(1)
+        if res.returncode == 0:
+            return True, ""
+        return False, (res.stderr or res.stdout).strip()
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout ({timeout}s)"
+    except Exception as e:
+        return False, str(e)
 
-    logger.info("Running functional correctness evaluation...")
-    logger.info("(This executes the generated code — may take a few minutes)")
 
-    results = evaluate_functional_correctness(str(samples_path), k=k_values)
+def evaluate_sample(sample: dict, problem: dict, timeout: float = EXEC_TIMEOUT) -> bool:
+    """Reconstruct full code and execute problem's unit tests."""
+    prompt = sample.get("prompt") or _ensure_indented_prompt(problem["prompt"])
+    completion = sample["completion"]
+    test_code = problem["test"]
+    entry_point = problem["entry_point"]
 
+    full_code = prompt + completion + "\n\n" + test_code + f"\n\ncheck({entry_point})\n"
+    passed, _ = _run_code_in_subprocess(full_code, timeout)
+    return passed
+
+
+def compute_pass_at_k(n: int, c: int, k: int) -> float:
+    if n - c < k:
+        return 1.0
+    return 1.0 - math.prod((n - c - i) / (n - i) for i in range(k))
+
+
+def run_evaluation(
+    samples_path: Path, problems: list[dict], k_values: list[int], timeout: float = EXEC_TIMEOUT
+) -> dict:
+    samples_by_task: dict[str, list[dict]] = {}
+    with open(samples_path, encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            samples_by_task.setdefault(obj["task_id"], []).append(obj)
+
+    prob_map = {p["task_id"]: p for p in problems}
+    pass_at_k_accum: dict[int, list[float]] = {k: [] for k in k_values}
+
+    total_passed_tasks = 0
+
+    for tid, problem in prob_map.items():
+        sample_list = samples_by_task.get(tid, [])
+        n = len(sample_list)
+        if n == 0:
+            continue
+
+        c = sum(evaluate_sample(s, problem, timeout) for s in sample_list)
+        if c > 0:
+            total_passed_tasks += 1
+            logger.info("  %-15s PASSED (%d/%d)", tid, c, n)
+        else:
+            logger.info("  %-15s FAILED (0/%d)", tid, n)
+
+        for k in k_values:
+            if k <= n:
+                pass_at_k_accum[k].append(compute_pass_at_k(n, c, k))
+
+    results = {}
     logger.info("")
     logger.info("=" * 50)
-    for key, value in results.items():
-        logger.info("  %-20s %.4f  (%.1f%%)", key, value, value * 100)
+    for k in k_values:
+        vals = pass_at_k_accum[k]
+        score = sum(vals) / len(vals) if vals else 0.0
+        results[f"pass@{k}"] = score
+        logger.info("  pass@%-4d  %.4f  (%.1f%%)", k, score, score * 100)
     logger.info("=" * 50)
 
     return results
@@ -219,36 +292,26 @@ def run_evaluation(samples_path: Path, k_values: list[int]) -> dict:
 def main() -> None:
     setup_logging()
     parser = argparse.ArgumentParser(description="HumanEval benchmark for SLM")
-    parser.add_argument(
-        "--n-samples",
-        type=int,
-        default=20,
-        help="Completions per problem. 20=pass@10, 200=pass@100 (default: 20)",
-    )
+    parser.add_argument("--n-samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--checkpoint", type=str, default=str(CHECKPOINT_DIR))
-    parser.add_argument(
-        "--eval-only",
-        action="store_true",
-        help="Skip generation; evaluate existing samples file",
-    )
+    parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--samples-file", type=str, default=str(SAMPLES_FILE))
     args = parser.parse_args()
 
     samples_path = Path(args.samples_file)
     k_values = [k for k in [1, 10, 100] if k <= args.n_samples] or [1]
 
+    problems = load_humaneval_problems()
+
     if not args.eval_only:
         logger.info("=== HumanEval Generation ===")
-        logger.info("n_samples    : %d", args.n_samples)
-        logger.info("temperature  : %.2f", args.temperature)
-        logger.info("top_p        : %.2f", args.top_p)
-        logger.info("checkpoint   : %s", args.checkpoint)
-        logger.info("")
+        logger.info("n_samples   : %d", args.n_samples)
+        logger.info("temperature : %.2f", args.temperature)
+        logger.info("checkpoint  : %s", args.checkpoint)
 
-        problems = load_humaneval_problems()
         samples = generate_samples(
             problems=problems,
             n_samples=args.n_samples,
@@ -266,7 +329,7 @@ def main() -> None:
 
     logger.info("")
     logger.info("=== HumanEval Evaluation (pass@%s) ===", k_values)
-    results = run_evaluation(samples_path, k_values)
+    results = run_evaluation(samples_path, problems, k_values)
 
     RESULTS_DIR.mkdir(exist_ok=True)
     output = {
@@ -274,8 +337,7 @@ def main() -> None:
         "checkpoint": args.checkpoint,
         "n_samples": args.n_samples,
         "temperature": args.temperature,
-        "top_p": args.top_p,
-        "pass_at_k": dict(results),
+        "pass_at_k": results,
     }
     RESULTS_FILE.write_text(json.dumps(output, indent=2))
     logger.info("Results saved to %s", RESULTS_FILE)
